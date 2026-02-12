@@ -1,0 +1,38 @@
+[00:00:10.309] Server  LOG     ✓ Ready in 9.2s
+[00:00:43.579] Server  LOG     ○ Compiling / ...
+[00:00:53.161] Server  WARN    bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)
+[00:00:54.148] Server  ERROR   ⨯ Error: NEXT_PUBLIC_SOLANA_RPC_URL is not defined. Add it to .env.local
+[00:00:55.748] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:00:56.865] Browser ERROR   uncaughtError: Error: NEXT_PUBLIC_SOLANA_RPC_URL is not defined. Add it to .env.local
+[00:01:54.245] Server  LOG       Reload env: .env.local
+[00:01:56.389] Server  WARN    bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)
+[00:01:57.229] Server  ERROR   ⨯ Error: NEXT_PUBLIC_SOLANA_RPC_URL is not defined. Add it to .env.local
+[00:01:57.865] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:01:58.459] Browser ERROR   uncaughtError: Error: NEXT_PUBLIC_SOLANA_RPC_URL is not defined. Add it to .env.local
+[00:02:08.811] Server  LOG       Reload env: .env.local
+[00:02:10.058] Server  WARN    bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)
+[00:02:11.123] Server  ERROR   ⨯ Error: NEXT_PUBLIC_SOLANA_RPC_URL is not defined. Add it to .env.local
+[00:02:11.262] Server  LOG       Reload env: .env.local
+[00:02:11.607] Server  LOG       Reload env: .env.local
+[00:02:13.227] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:02:15.871] Browser ERROR   uncaughtError: Error: NEXT_PUBLIC_SOLANA_RPC_URL is not defined. Add it to .env.local
+[00:02:42.978] Server  LOG       Reload env: .env.local
+[00:02:44.392] Server  WARN    ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+[00:02:44.394] Server  WARN    ⚠ Fast Refresh had to perform a full reload when ./src/lib/solana.ts changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+[00:02:44.396] Server  WARN    ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+[00:02:44.591] Server  WARN    bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)
+[00:02:44.656] Server  LOG     Initializing RPC Connection to: "https://mainnet.helius-rpc.com/?key=***"
+[00:02:45.210] Server  LOG     ✓ Compiled in 0ms
+[00:02:46.458] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:02:50.374] Browser LOG     Initializing RPC Connection to: https://mainnet.helius-rpc.com/?key=***
+[00:02:50.709] Browser ERROR   Position fetch error: {}
+[00:02:56.853] Server  LOG       Reload env: .env.local
+[00:02:57.549] Server  WARN    ⚠ Fast Refresh had to perform a full reload when ./node_modules/next/dist/client/image-component.js changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+[00:02:57.686] Server  LOG     ✓ Compiled in 0ms
+[00:02:58.290] Server  WARN    bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)
+[00:02:58.295] Server  LOG     Initializing RPC Connection to: "https://mainnet.helius-rpc.com/?key=***"
+[00:02:58.703] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:02:59.615] Browser LOG     Initializing RPC Connection to: https://mainnet.helius-rpc.com/?key=***
+[00:03:00.724] Browser LOG     Position loaded: {"colRaw":"1754afe2","debtRaw":"05176f53ba","dustDebtRaw":"4acbb3","finalAmount":"1754afe2","isSupplyOnlyPosition":false,"postLiquidationBranchId":1,"tick":2685,"tickId":1,"userLiquidationStatus":true}
+[00:03:15.407] Browser LOG     Initializing RPC Connection to: https://mainnet.helius-rpc.com/?key=***
+[00:03:16.764] Browser LOG     Position loaded: {"colRaw":"1754afe2","debtRaw":"05176f53ba","dustDebtRaw":"4acbb3","finalAmount":"1754afe2","isSupplyOnlyPosition":false,"postLiquidationBranchId":1,"tick":2685,"tickId":1,"userLiquidationStatus":true}
