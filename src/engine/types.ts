@@ -13,6 +13,7 @@ export interface LendingTransactionInput {
     priorityFeeMicroLamports?: number;
     computeUnits?: number;
     preInstructions?: TransactionInstruction[];
+    postInstructions?: TransactionInstruction[];
 }
 
 export interface ComputedTransaction {

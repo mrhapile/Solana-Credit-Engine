@@ -146,6 +146,9 @@ export const WithdrawModal = ({
       const wsolAccount = getAssociatedTokenAddressSync(NATIVE_MINT, publicKey);
       const postInstructions = [];
 
+      // If token is SOL (NATIVE_MINT), we should close the account to unwrap
+      // This logic assumes we are handling SOL. Ideally we check tokenSymbol or mint.
+      // For now, consistent with previous behavior, we add close instruction.
       postInstructions.push(
         createCloseAccountInstruction(
           wsolAccount,
@@ -154,27 +157,28 @@ export const WithdrawModal = ({
         )
       );
 
-      const amountInLamports = Math.floor(amount * 1e9);
-
-      // For Withdraw: col_amount < 0, debt_amount = 0
-      const txid = await operate(-amountInLamports, 0, postInstructions);
+      // Pass negative amount for withdrawal, natural units
+      // Pass empty preInstructions
+      // Pass postInstructions as 4th argument
+      const txid = await operate(-amount, 0, [], postInstructions);
 
       toast.success("Withdrawal Successful!", {
         description: `Successfully withdrew ${amount.toFixed(
           6
-        )} ${tokenSymbol}. Transaction: ${txid}`,
-        duration: 5000,
+        )} ${tokenSymbol}.`,
+        action: {
+          label: "View on Solscan",
+          onClick: () => window.open(`https://solscan.io/tx/${txid}`, "_blank")
+        }
       });
       setWithdrawAmount("");
       onOpenChange(false);
     } catch (error) {
-      toast.error("Transaction Failed", {
-        description:
-          error instanceof Error
-            ? error.message
-            : "Something went wrong while processing your withdrawal. Please try again.",
-      });
+      // Error handling delegated to engine/toast
       console.error("Withdraw error:", error);
+      if (error instanceof Error) {
+        toast.error("Transaction Failed", { description: error.message });
+      }
     }
   };
 

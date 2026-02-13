@@ -1,25 +1,26 @@
 
+
 import {
     Connection,
-    PublicKey,
     TransactionInstruction,
     SystemProgram,
     ComputeBudgetProgram,
-    GetProgramAccountsFilter
+    PublicKey
 } from "@solana/web3.js";
 import {
     getAssociatedTokenAddressSync,
     createAssociatedTokenAccountInstruction,
     createSyncNativeInstruction,
     NATIVE_MINT,
-    getMint
 } from "@solana/spl-token";
 import { getOperateIx } from "@jup-ag/lend/borrow";
 import BN from "bn.js";
 import { ComputedTransaction, LendingTransactionInput } from "./types";
+import { getMintDecimals } from "../lib/solana";
+import { USDC_MINT, SOL_MINT } from "./constants";
 
-// Default configuration (can be overridden)
-const DEFAULT_COMPUTE_UNITS = 1_400_000;
+// Default configuration for INITIAL simulation (safe upper bound)
+const SIMULATION_COMPUTE_UNITS = 1_400_000;
 const DEFAULT_PRIORITY_FEE = 1000; // Micro-lamports
 
 /**
@@ -41,55 +42,38 @@ export async function buildLendingTransaction(
         userPublicKey,
         priorityFeeMicroLamports,
         computeUnits,
-        preInstructions: extraInstructions = []
+        preInstructions: extraPreInstructions = [],
+        postInstructions: extraPostInstructions = []
     } = input;
 
-    // 1. Fetch Dynamic Mint Info (In a real pure system, this would be passed in)
-    // For now, we assume SOL/USDC for simplicity of the prototype migration, 
-    // but we implement the decimal fetching logic.
+    // 1. Fetch Dynamic Mint Info
+    // We fetch decimals for SOL and USDC dynamically to avoid hardcoding.
+    const [solDecimals, usdcDecimals] = await Promise.all([
+        getMintDecimals(connection, new PublicKey(SOL_MINT)),
+        getMintDecimals(connection, new PublicKey(USDC_MINT))
+    ]);
 
-    // Note: To make this truly generic, we'd need to know the Vault's collateral mint and debt mint.
-    // Since the SDK hides some of this, we'll assume standard processing or fetch from SDK if possible.
-    // For this refactor, we keep the wrapping logic for SOL specifically, as requested.
-
-    // 1. Normalize Amounts
-    // We need to know the decimals. 
-    // SOL = 9 decimals
-    // USDC = 6 decimals
-    // In a robust system, we would query the vault config to get the mints.
-    // For this exercise, we will assume the input handling (which was previously hardcoded) 
-    // needs to be dynamic. 
-
-    // Let's assume the user passes input in "UI Units" (e.g. 1.5 SOL).
-    const solDecimals = 9;
-    const usdcDecimals = 6;
-
+    // 2. Normalize Amounts
     const colLamports = new BN(Math.floor(colAmount * Math.pow(10, solDecimals)));
     const debtLamports = new BN(Math.floor(debtAmount * Math.pow(10, usdcDecimals)));
 
-    // 2. Build Core Lending Instructions
-    // This function from the SDK likely fetches vault state to validate.
+    // 3. Build Core Lending Instructions
     const { ixs, addressLookupTableAccounts } = await getOperateIx({
         vaultId,
         positionId,
         colAmount: colLamports,
         debtAmount: debtLamports,
         signer: userPublicKey,
-        connection, // The SDK needs this
+        connection,
     });
 
-    // 3. Handle SOL Wrapping (Deterministic Logic)
-    // If collateral is being deposited (colAmount > 0) and it is SOL, we might need to wrap.
-    // The original code in `deposit.tsx` checked if the WSOL account existed.
-    // To keep this pure-ish, we should check existence here.
+    // 4. Handle SOL Wrapping (Deterministic Logic)
     const preInstructions: TransactionInstruction[] = [];
 
     if (colAmount > 0) {
-        // Check if we need to wrap SOL
         const wsolAccount = getAssociatedTokenAddressSync(NATIVE_MINT, userPublicKey);
 
-        // We must check if the account exists to decide whether to create it.
-        // This is a "read" operation, allowable in an async builder.
+        // Check availability
         const accountInfo = await connection.getAccountInfo(wsolAccount);
 
         if (!accountInfo) {
@@ -103,7 +87,7 @@ export async function buildLendingTransaction(
             );
         }
 
-        // Initial wrap logic: Transfer SOL to WSOL account
+        // Transfer SOL to WSOL account
         preInstructions.push(
             SystemProgram.transfer({
                 fromPubkey: userPublicKey,
@@ -116,10 +100,13 @@ export async function buildLendingTransaction(
         preInstructions.push(createSyncNativeInstruction(wsolAccount));
     }
 
-    // 4. Compute Budget Instructions
-    // In a future iteration, we would simulate here to get exact units.
-    // For now, we use the passed or default values to ensure determinism.
-    const finalComputeUnits = computeUnits || DEFAULT_COMPUTE_UNITS;
+    // 5. Compute Budget Instructions
+    // If computeUnits is provided, use it. Otherwise use safe upper bound for simulation.
+    // The executor is responsible for optimizing this after simulation.
+    const finalComputeUnits = computeUnits || SIMULATION_COMPUTE_UNITS;
+
+    // Prioritization fees should be dynamic. 
+    // If not provided, we default to a minimal value, but the executor should optimize this.
     const finalPriorityFee = priorityFeeMicroLamports || DEFAULT_PRIORITY_FEE;
 
     const computeBudgetInstructions = [
@@ -131,8 +118,8 @@ export async function buildLendingTransaction(
         }),
     ];
 
-    // 5. Assemble
-    const instructions = [...preInstructions, ...extraInstructions, ...ixs];
+    // 6. Assemble
+    const instructions = [...preInstructions, ...extraPreInstructions, ...ixs, ...extraPostInstructions];
 
     return {
         instructions,

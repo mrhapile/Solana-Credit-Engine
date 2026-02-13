@@ -14,7 +14,8 @@ export function useOperate(vaultId: number, positionId: number) {
     async (
       colAmount: number, // In UI units (e.g. 1.5 SOL)
       debtAmount: number, // In UI units (e.g. 100 USDC)
-      preInstructions: TransactionInstruction[] = []
+      preInstructions: TransactionInstruction[] = [],
+      postInstructions: TransactionInstruction[] = []
     ) => {
       if (!wallet.publicKey) {
         throw new Error("Wallet not connected");
@@ -33,6 +34,7 @@ export function useOperate(vaultId: number, positionId: number) {
             debtAmount,
             userPublicKey: wallet.publicKey,
             preInstructions,
+            postInstructions,
             // In production, fetch these dynamically
             // priorityFeeMicroLamports: fetchedPriorityFee
           }

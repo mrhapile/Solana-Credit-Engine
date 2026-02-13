@@ -100,11 +100,8 @@ export const RepayModal = ({
         description: "Please confirm the transaction in your wallet...",
       });
 
-      // amount -> smallest unit of usdc
-      const amountInSmallestUnit = Math.floor(amount * 1e6);
-
-      //payback: col_amount = 0, debt_amount < 0
-      const txid = await operate(0, -amountInSmallestUnit);
+      // payback: col_amount = 0, debt_amount < 0 (natural units)
+      const txid = await operate(0, -amount);
 
       toast.success("Repay Successful!", {
         description: `Successfully repaid ${amount.toFixed(

@@ -134,9 +134,6 @@ export const BorrowModal = ({
         description: "Please confirm the transaction in your wallet...",
       });
 
-      // convert amount to smallest unit (USDC has 6 decimals)
-      const amountInSmallestUnit = Math.floor(amount * 1e6);
-
       // borrow: col_amount = 0, debt_amount > 0 (pass natural units)
       const txid = await operate(0, amount);
 
