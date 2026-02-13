@@ -91,7 +91,7 @@ const CardContainer = ({
   const debtUSDFormatted = `$${data.debtUSD.toFixed(2)}`;
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 animate-in fade-in duration-700 slide-in-from-bottom-2">
       <div className="grid gap-5 lg:grid-cols-3 sm:grid-cols-2">
         <CustomCard
           title="Supplied Collateral"

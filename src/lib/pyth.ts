@@ -54,36 +54,41 @@ interface PythPrice {
  * Parses a Pyth V2 on-chain price account.
  * Returns the aggregate price, confidence, and exponent.
  */
-export function parsePythPriceAccount(data: Buffer): PythPrice | null {
+/**
+ * Parses a Pyth V2 on-chain price account.
+ * Returns the aggregate price, confidence, and exponent.
+ * 
+ * Uses DataView to be runtime-agnostic (Node, Browser, Edge).
+ */
+export function parsePythPriceAccount(data: Buffer | Uint8Array): PythPrice | null {
     try {
         // Minimum account size check
         if (data.length < 200) return null;
 
+        // Wrap in DataView
+        // Note: Buffer in Node is a Uint8Array, so this works for both.
+        const buffer = data.buffer;
+        const byteOffset = data.byteOffset;
+        const byteLength = data.byteLength;
+        const view = new DataView(buffer, byteOffset, byteLength);
+
         // Magic number check: 0xa1b2c3d4 (LE)
-        const magic = data.readUInt32LE(0);
+        const magic = view.getUint32(0, true);
         if (magic !== 0xa1b2c3d4) {
-            // Might be a V1 or unknown format
             console.warn("[Pyth] Unknown magic:", magic.toString(16));
             return null;
         }
 
         // Exponent at offset 20 (int32)
-        const exponent = data.readInt32LE(20);
-
-        // Number of price components at offset 24 (uint32)
-        // const numComponents = data.readUInt32LE(24);
+        const exponent = view.getInt32(20, true);
 
         // Aggregate price data starts at offset 208 in V2 accounts
-        // aggregate.price (int64 LE) at offset 208
-        // aggregate.conf  (uint64 LE) at offset 216
-        // aggregate.status (uint32 LE) at offset 224
-
         const AGGREGATE_PRICE_OFFSET = 208;
 
-        // Read price as int64 (LE) — use BigInt for safety
-        const priceBigInt = data.readBigInt64LE(AGGREGATE_PRICE_OFFSET);
-        const confBigInt = data.readBigUInt64LE(AGGREGATE_PRICE_OFFSET + 8);
-        const status = data.readUInt32LE(AGGREGATE_PRICE_OFFSET + 16);
+        // Read price as int64 (LE)
+        const priceBigInt = view.getBigInt64(AGGREGATE_PRICE_OFFSET, true);
+        const confBigInt = view.getBigUint64(AGGREGATE_PRICE_OFFSET + 8, true);
+        const status = view.getUint32(AGGREGATE_PRICE_OFFSET + 16, true);
 
         const price = Number(priceBigInt);
         const confidence = Number(confBigInt);
@@ -163,12 +168,21 @@ export async function fetchPythSolPrice(): Promise<{
  * Get SOL price with Pyth as primary, REST API as fallback.
  * This is the function that should replace all direct REST price calls.
  */
-export async function getSolPrice(): Promise<number> {
+export async function getSolPrice(): Promise<{ price: number; confidence: number; source: string }> {
     try {
-        const { price } = await fetchPythSolPrice();
-        return price;
+        return await fetchPythSolPrice();
     } catch (err) {
         console.warn("[Pyth] Oracle unavailable, falling back to REST:", err);
+
+        // If cached price exists, prefer that over REST failure
+        if (pythPriceCache) {
+            return {
+                price: pythPriceCache.price,
+                confidence: pythPriceCache.confidence,
+                source: "pyth_cache"
+            };
+        }
+
         // Fallback: try Jupiter REST
         try {
             const resp = await fetch(
@@ -176,11 +190,14 @@ export async function getSolPrice(): Promise<number> {
             );
             const json = await resp.json();
             const price = parseFloat(json?.data?.["So11111111111111111111111111111111111111112"]?.price);
-            if (!isNaN(price) && price > 0) return price;
+            if (!isNaN(price) && price > 0) {
+                return {
+                    price,
+                    confidence: 0,
+                    source: "jupiter_rest"
+                };
+            }
         } catch { /* fall through */ }
-
-        // If both fail, check cache
-        if (pythPriceCache) return pythPriceCache.price;
 
         throw new Error("All price sources unavailable");
     }

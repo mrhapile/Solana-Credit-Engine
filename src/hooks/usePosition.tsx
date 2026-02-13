@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getCurrentPosition } from "@jup-ag/lend/borrow";
 import { getConnection } from "@/lib/solana";
 import { safeRpcCall } from "@/lib/rpcGuard";
-import { getSolPrice } from "@/lib/pyth";
+import { useSolPrice } from "@/hooks/useSolPrice";
 import { SOL_MINT, USDC_MINT, SOL_DECIMALS, USDC_DECIMALS } from "@/engine/constants";
 import { useState, useEffect, useCallback } from "react";
 import BN from "bn.js";
@@ -80,16 +80,8 @@ export function usePosition(vaultId: number, positionId: number, options?: { pau
   });
 
   // ── Price Query — Pyth Oracle ────────────────────────────────
-  const {
-    data: solPrice,
-    isLoading: priceLoading,
-  } = useQuery({
-    queryKey: ['pyth-sol-price'],
-    queryFn: () => getSolPrice(),
-    refetchInterval: 30_000,
-    staleTime: 15_000,
-    enabled: initialDelayPassed,
-  });
+  // Use centralized hook via API route (staggered ~200ms, cached)
+  const { price: solPrice, loading: priceLoading, error: priceError } = useSolPrice();
 
   const currentSolPrice = solPrice || 0;
   const usdcPrice = 1; // Stablecoin
@@ -108,7 +100,8 @@ export function usePosition(vaultId: number, positionId: number, options?: { pau
   return {
     position: position || null,
     formatted,
-    loading: posLoading || priceLoading,
-    error: (posError as Error)?.message || null,
+    // Ensure we show loading while waiting for the stagger delay
+    loading: posLoading || priceLoading || !initialDelayPassed,
+    error: (posError as Error)?.message || priceError || null,
   };
 }

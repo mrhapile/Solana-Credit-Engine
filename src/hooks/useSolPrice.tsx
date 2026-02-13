@@ -1,54 +1,54 @@
+import { useQuery } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
-import { getSolPrice } from "../lib/pyth";
 
 export interface SolPriceState {
     price: number | null;
+    confidence: number | null;
+    source: string | null;
     loading: boolean;
     error: string | null;
 }
 
 /**
- * Hook to fetch SOL price.
- * Primary source: Pyth on-chain oracle.
- * Fallback: Jupiter REST API.
+ * Hook to fetch SOL price via our server-side API route.
+ * Prevents direct client RPC calls and hydration mismatches.
  */
 export function useSolPrice() {
-    const [state, setState] = useState<SolPriceState>({
-        price: null,
-        loading: true,
-        error: null,
-    });
+    // Stagger price fetch to avoid contesting with position fetch
+    const [enabled, setEnabled] = useState(false);
 
     useEffect(() => {
-        let mounted = true;
-
-        const loadPrice = async () => {
-            try {
-                const price = await getSolPrice();
-                if (mounted) {
-                    setState({ price, loading: false, error: null });
-                }
-            } catch (err: any) {
-                if (mounted) {
-                    setState({
-                        price: null,
-                        loading: false,
-                        error: err.message || "Failed to fetch SOL price",
-                    });
-                }
-            }
-        };
-
-        loadPrice();
-
-        // Refresh every 30s (aligned with Pyth cache TTL)
-        const interval = setInterval(loadPrice, 30_000);
-
-        return () => {
-            mounted = false;
-            clearInterval(interval);
-        };
+        const timer = setTimeout(() => setEnabled(true), 200);
+        return () => clearTimeout(timer);
     }, []);
 
-    return state;
+    const { data, isLoading, error } = useQuery({
+        queryKey: ["sol-price"],
+        queryFn: async () => {
+            const res = await fetch("/api/price");
+            if (!res.ok) throw new Error("Failed to fetch price");
+            return res.json() as Promise<{ price: number; confidence: number; source: string }>;
+        },
+        staleTime: 30_000, // 30s cache
+        refetchOnWindowFocus: false,
+        refetchOnMount: false, // Prevent extra fetch on hydration if data exists
+        retry: 1,
+        enabled: enabled,
+    });
+
+    // Ensure we report loading even during the initial delay
+    const isActuallyLoading = isLoading || !enabled;
+
+    return {
+        price: data?.price || null,
+        confidence: data?.confidence || null,
+        source: data?.source || null,
+        loading: isActuallyLoading,
+        error: error ? (error as Error).message : null,
+        state: { // Backwards compatibility if needed
+            price: data?.price || null,
+            loading: isActuallyLoading,
+            error: error ? (error as Error).message : null,
+        }
+    };
 }
