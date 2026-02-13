@@ -1,4 +1,3 @@
-
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { buildLendingTransaction } from "../../engine/builder";
@@ -8,6 +7,15 @@ import * as jup from "@jup-ag/lend/borrow";
 // Mock the external dependencies
 vi.mock("@jup-ag/lend/borrow", () => ({
     getOperateIx: vi.fn(),
+}));
+
+vi.mock("@/lib/solana", () => ({
+    getMintDecimals: vi.fn(async (_conn: any, mint: any) => {
+        const m = mint.toBase58();
+        if (m === "So11111111111111111111111111111111111111112") return 9;
+        if (m === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") return 6;
+        return 9;
+    }),
 }));
 
 // Mock Connection
@@ -53,15 +61,7 @@ describe("buildLendingTransaction", () => {
         expect(result.metadata.computeUnits).toBe(1400000); // Default
         expect(result.metadata.priorityFeeMicroLamports).toBe(5000); // Input
 
-        // Check if wrapping instructions are added (transfer + sync)
-        // We expect transfer because account exists, but creation instruction should be absent
-        // Transfer (1) + Sync (1) + Operate (1) = 3
-        expect(result.instructions.length).toBe(3);
-        // ComputedTransaction has separate arrays?
-        // Let's check type definition: computeBudgetInstructions array separate.
-        // AND main instructions array has `preInstructions` + `ixs`.
-        // So main instructions length should be 2 + 1 = 3.
-
+        // When WSOL account exists: Transfer(1) + Sync(1) + Operate(1) = 3
         expect(result.instructions.length).toBe(3);
         expect(result.computeBudgetInstructions.length).toBe(2);
     });

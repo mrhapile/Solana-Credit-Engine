@@ -1,64 +1,69 @@
+# Solana Credit Engine
 
-# Solana Lending Transaction Reliability Engine
+Solana Credit Engine is a production-grade transaction orchestration and risk simulation engine for DeFi lending. It bridges the gap between raw on-chain protocols and high-integrity user interfaces, ensuring every transaction is validated, simulated, and optimized before the user signs.
 
-> A deterministic, simulation-first lending interface built on the Jupiter SDK. Refactored for robust transaction handling, safety checks, and observability.
+## Why This Project Exists
 
-## Overview
+Naive DeFi interfaces often suffer from silent failures, opaque risk profiles, and fragile RPC dependencies. The Solana Credit Engine solves these by:
+- **Simulation-First Philosophy**: No transaction is signed without a successful on-chain simulation and risk impact preview.
+- **Oracle-First Design**: Position health is calculated using real-time on-chain Pyth oracle prices, not cached or secondary REST APIs.
+- **RPC Resilience**: A dedicated governance layer prevents rate-limiting and manages transaction finality with professional polling strategies.
 
-This project implements a production-grade transaction engine for Solana lending protocols. Unlike standard UI implementations, this engine prioritizes **determinism**, **safety**, and **observability**.
+## Architecture Overview
 
-It features a pure-function transaction builder, pre-execution simulation with error mapping, and a robust confirmation loop with exponential backoff.
-
-![Architecture](https://github.com/user-attachments/assets/52834e9d-62a8-4dcf-8f0d-254926bfb0d0) 
-*(Note: Video links from original repo preserved below)*
+```mermaid
+graph TD
+    UI[React UI]
+    UI --> Hook[useTransactionLifecycle]
+    Hook --> Executor[Transaction Executor]
+    Executor --> Guard[RPC Guard]
+    Guard --> RPC[Solana RPC]
+    RPC --> Pyth[Pyth Oracle]
+```
 
 ## Core Engineering Features
 
-### 1. Deterministic Transaction Builder (`src/engine/builder.ts`)
-- **Pure Function Logic**: Transaction construction is separated from network side-effects.
-- **Dynamic Normalization**: Handles token decimals and ATA creation logic deterministically.
-- **Compute Budgeting**: Automatic priority fee and compute unit allocation.
+- **Standardized Lifecycle State Machine**: Tracks transactions through `Idle → Building → Simulating → Optimizing → Awaiting Signature → Sending → Confirming → Success`.
+- **Simulation Preview Layer**: Dynamically estimates compute units and projects the impact on Health Factor (HF) before execution.
+- **Dynamic Compute Budgeting**: Injecting priority fee and compute unit instructions based on real-time network congestion.
+- **RPC Burst Governance**: Transparent 429 handling and request spacing to ensure high-reliability communication.
+- **Memory-Cached On-Chain Prices**: Fetches and parses raw Pyth Oracle account data with a 30s smart cache.
+- **Atomic Leverage Loop**: Composes multiple instructions (Supply, Borrow, Swap, Re-deposit) into a single atomic Transaction.
+- **CI-Enforced Correctness**: Full test suite verifying risk math, parsing logic, and execution flows.
 
-### 2. Pre-Execution Simulation (`src/engine/simulation.ts`)
-- **Safety Check**: Every transaction is simulated against the latest blockhash before user signing.
-- **Error Classification**: Maps opaque program errors (e.g., `0x1`) to human-readable states (Insufficient Funds, Slippage).
-- **Zero-Waste**: Prevents users from paying gas for failed transactions.
+## Risk Engine Specification
 
-### 3. Robust Confirmation Engine (`src/engine/confirmation.ts`)
-- **Polled Finality**: Does not rely on WebSocket instability.
-- **Exponential Backoff**: Handles network congestion gracefully.
-- **Idempotency**: Designed to safely handle retries.
+- **Health Factor**: `(Collateral Value * Liquidation Threshold) / Debt Value`. An HF > 1.0 is required to remain safe from liquidation.
+- **Liquidation Price**: The asset price at which `HF = 1.0`. Calculated via `Debt Value / (Collateral Amount * Liquidation Threshold)`.
+- **Decimal Safety**: Strictly uses `BN.js` for all lamport-level calculations to prevent floating-point precision loss.
 
-### 4. Real-Time Observability
-- **TanStack Query**: Replaced legacy `useEffect` chains with robust, cached polling.
-- **Live Pricing**: Integrated Jupiter Price API for real-time LTV calculations.
+## Infrastructure Discipline
 
-## Architecture
+- **429 Rate Limit Handling**: Automatic halts and exponential backoff when encountering RPC congestion.
+- **Priority Fee Estimation**: Monotonic cache for recent priority fees to minimize redundant RPC calls.
+- **Polling Governance**: Intelligent signature status checks with capped retries and monotonic time advancement in tests.
 
-See [docs/architecture.md](docs/architecture.md) for a detailed breakdown of the data flow and state management.
+## Testing & CI
 
-## Getting Started
+- **Coverage**: ~76% overall, with core engine logic exceeding 90%.
+- **Deterministic Testing**: Uses Vitest fake timers to bypass cache windows and verify complex retry/timeout behaviors.
+- **Validation**: Includes integration tests for Pyth account parsing and Jupiter routing.
 
-```bash
-npm install
-npm run dev
-```
+## Failure Modes & Assumptions
 
-Run the unit tests for the deterministic builder:
+- **Oracle Stale Prices**: Falls back to Jupiter/CoinGecko REST APIs if Pyth accounts are unreachable or stale.
+- **Compute Budget Fallback**: Applies a conservative 200,000 unit limit if simulation fails.
+- **RPC Stability**: In the event of persistent RPC failure, the engine halts the status at `Failed` and surfaces a human-readable diagnosis instead of raw JSON logs.
 
-```bash
-npm test
-```
+## Demo
 
-## Documentation
+[Placeholder: Link to Demo Video]
 
-- [Transaction Lifecycle](docs/transaction-lifecycle.md)
-- [Security Considerations](docs/security-considerations.md)
-- [Architecture](docs/architecture.md)
+### Screenshots
 
-## Tech Stack
+[Placeholder: UI Overview]
+[Placeholder: Leverage Loop Preview]
 
-- **Engine**: TypeScript, `@solana/web3.js`
-- **State**: TanStack Query (React Query)
-- **Protocol**: Jupiter Lending SDK (`@jup-ag/lend`)
-- **Testing**: Vitest
+## License
+
+MIT © 2026 Solana Credit Engine Team

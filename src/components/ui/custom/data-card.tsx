@@ -1,3 +1,5 @@
+import { cn } from "@/lib/utils";
+
 interface DataCardProps {
   suppliedAmount: number;
   suppliedToken: string;
@@ -176,9 +178,8 @@ export const DataCard = ({
           <span className="iconify ph--percent" />
         </span>
         <span
-          className={`text-sm ${
-            metrics.netYield >= 0 ? "text-emerald-400" : "text-red-400"
-          }`}
+          className={`text-sm ${metrics.netYield >= 0 ? "text-emerald-400" : "text-red-400"
+            }`}
         >
           {metrics.netYield >= 0 ? "+" : ""}
           {metrics.netYield.toFixed(2)}%
@@ -236,7 +237,7 @@ export const DataCard = ({
             <span className={`${riskInfo.textColor} text-sm`}>
               {riskInfo.label}
             </span>
-            <span className="text-sm">
+            <span className="text-sm font-bold tracking-tight">
               {metrics.utilizationRatio.toFixed(2)}%
             </span>
           </span>
@@ -252,21 +253,25 @@ export const DataCard = ({
             data-state="loading"
             data-value={metrics.utilizationRatio}
             data-max="100"
-            className={`relative h-1.5 w-full overflow-hidden rounded-xl ${riskInfo.background}`}
-            style={{ transform: "translateY(0px)" }}
+            className={`relative h-2 w-full overflow-hidden rounded-full bg-slate-900 border border-white/5`}
           >
             <div
-              data-state="loading"
-              data-value={metrics.utilizationRatio}
-              data-max="100"
-              className={`h-full w-full transition-all duration-300 ${riskInfo.progress}`}
-              style={{ width: `${Math.min(metrics.utilizationRatio, 100)}%` }}
+              className={cn(
+                "h-full transition-all duration-1000 ease-out shadow-[0_0_8px_rgba(0,0,0,0.3)]",
+                metrics.utilizationRatio < 30 ? "bg-emerald-500" :
+                  metrics.utilizationRatio < 60 ? "bg-yellow-500" :
+                    metrics.utilizationRatio < 80 ? "bg-orange-500" : "bg-red-500"
+              )}
+              style={{
+                width: `${Math.min(metrics.utilizationRatio, 100)}%`,
+                backgroundImage: 'linear-gradient(90deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0) 100%)'
+              }}
             />
           </div>
 
-          <div className="flex items-center justify-between text-xs text-neutral-500">
-            <span>{metrics.utilizationRatio.toFixed(2)}%</span>
-            <span>Max: L.T. 80%</span>
+          <div className="flex items-center justify-between text-[10px] font-bold text-neutral-600 uppercase tracking-tighter">
+            <span>Utilization</span>
+            <span>Liquidation Threshold: 80%</span>
           </div>
         </div>
       </div>

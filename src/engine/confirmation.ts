@@ -28,8 +28,11 @@ export async function confirmTransaction(
             ) {
                 return true;
             }
-        } catch (e) {
-            // Create transient failure, just wait and retry
+        } catch (e: any) {
+            // If it's the error we just threw, rethrow it
+            if (e.message.startsWith("Transaction failed:")) throw e;
+
+            // Otherwise, it's a transient failure (e.g. RPC timeout), just wait and retry
             console.warn("Confirmation check failed, retrying...", e);
         }
 
