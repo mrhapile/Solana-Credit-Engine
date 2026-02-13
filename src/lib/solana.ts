@@ -104,6 +104,7 @@ export async function estimatePriorityFee(
         return Math.max(fee, 1000); // Ensure at least 1000 (min)
     } catch (e) {
         console.warn("Failed to estimate priority fee, defaulting to 1000", e);
+        // We still return default, but log warning. Caller handles if critical.
         return 1000;
     }
 }

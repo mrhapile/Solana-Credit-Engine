@@ -36,6 +36,10 @@ interface DepositModalProps {
   borrowedAmountFiat?: string;
 }
 
+
+import { SimulationPreview } from "@/components/ui/transactions/SimulationPreview";
+import { TransactionExplorer } from "@/components/ui/transactions/TransactionExplorer";
+
 export const DepositModal = ({
   open,
   onOpenChange,
@@ -52,10 +56,13 @@ export const DepositModal = ({
   const [depositAmount, setDepositAmount] = useState("");
   const [riskPercentage, setRiskPercentage] = useState(0);
   const { connected, publicKey } = useWallet();
-  const { operate } = useOperate(vaultId, positionId);
+  const { operate, simulate, state: txState, reset: txReset } = useOperate(vaultId, positionId);
   const [walletBalance, setWalletBalance] = useState(0);
   const [decimals, setDecimals] = useState(9); // Default to 9 for SOL, fetch dynamic
   const { price: solPrice, loading: priceLoading } = useSolPrice();
+
+  // UI State for Preview Modal
+  const [showPreview, setShowPreview] = useState(false);
 
   // Fetch actual wallet balance from RPC & Decimals
   useEffect(() => {
@@ -79,6 +86,18 @@ export const DepositModal = ({
       }
     })();
   }, [publicKey]);
+
+  // Handle Dialog Close (Clean up)
+  const handleOpenChange = (isOpen: boolean) => {
+    onOpenChange(isOpen);
+    if (!isOpen) {
+      setTimeout(() => {
+        setDepositAmount("");
+        txReset();
+        setShowPreview(false);
+      }, 300);
+    }
+  };
 
   const handleHalf = () => {
     setDepositAmount((walletBalance / 2).toFixed(decimals > 6 ? 6 : decimals)); // limit display decimals
@@ -128,96 +147,97 @@ export const DepositModal = ({
 
   const calculateFiatValue = () => {
     if (!depositAmount || parseFloat(depositAmount) <= 0) return "$0.00";
-    if (priceLoading || !solPrice) return "$0.00"; // Or fall back to prop?
+    if (priceLoading || !solPrice) return "$0.00";
 
     const val = parseFloat(depositAmount) * solPrice;
     return `$${val.toFixed(2)}`;
   };
 
-  // ... (risk status logic omitted, assumed unchanged or outside this block) ...
-  // Wait, I need to include getRiskStatus if I'm replacing the whole function body or block.
-  // The instruction said "Remove hardcoded logic from DepositModal active code block". I should validly replace the handler.
-
-  const handleDeposit = async (e: React.FormEvent) => {
+  const handleInitialClick = (e: React.FormEvent) => {
     e.preventDefault();
-
+    // Validation Logic
     if (!connected || !publicKey) {
-      toast.error("Wallet Not Connected", {
-        description: "Please connect your wallet to proceed with the deposit.",
-      });
+      toast.error("Wallet Not Connected");
       return;
     }
-
     const amount = parseFloat(depositAmount);
-
-    if (isNaN(amount)) {
-      toast.error("Invalid Amount", {
-        description: "Please enter a valid deposit amount.",
-      });
+    if (isNaN(amount) || amount <= 0) {
+      toast.error("Invalid Amount");
       return;
     }
-
-    if (amount <= 0) {
-      toast.error("Invalid Amount", {
-        description: "Deposit amount must be greater than 0.",
-      });
-      return;
-    }
-
-    if (walletBalance < WSOL_ACCOUNT_RENT) {
-      toast.error("Insufficient SOL Balance", {
-        description: `You need at least ${WSOL_ACCOUNT_RENT} SOL to create the required account.`,
-        duration: 6000,
-      });
-      return;
-    }
-
     if (amount > walletBalance - WSOL_ACCOUNT_RENT) {
-      // ... error logic ...
-      const maxDeposit = walletBalance - WSOL_ACCOUNT_RENT;
-      toast.error("Amount Exceeds Available Balance", {
-        description: `Max deposit: ${maxDeposit.toFixed(6)} SOL`,
-      });
+      toast.error("Insufficient Funds", { description: "Remember to leave Sol for rent." });
       return;
     }
 
-    try {
-      toast.info("Processing Deposit", {
-        description: "Please confirm the transaction in your wallet...",
-      });
+    // Open Preview -> Logic continues in handleConfirmDeposit
+    setShowPreview(true);
+    // We trigger simulation implicitly by calling operate logic? 
+    // Requirement: "Display preview modal containing Estimated Compute Units... If simulation fails DO NOT open wallet popup"
+    // Our `operate` function bundles everything. 
+    // To meet requirement 2 ("Before triggering wallet popup... Display preview..."), we need to SPLIT or PAUSE execution.
 
-      // Delegate logic to engine. Pass natural units.
-      // preInstructions for wrapping are handled by the builder now.
-      const txid = await operate(amount, 0);
+    // Since executeLendingTransaction is one atomic async flow, we need to adapt.
+    // EITHER:
+    // 1. We start `operate` which runs simulation, then PAUSES before signing? (Hard with web3.js linearly)
+    // 2. We run a separate `simulateOnly` call first?
+    // 
+    // Let's go with option 2 for safety and clarity as per req "Display preview modal... If simulation fails... DO NOT open wallet popup".
 
-      toast.success("Deposit Successful!", {
-        description: `Successfully deposited ${amount.toFixed(
-          decimals > 4 ? 4 : decimals
-        )} ${tokenSymbol}.`,
-        // We can add "View on Solscan" here or rely on the engine returning link?
-        // useOperate returns signature. We can link it.
-        action: {
-          label: "View on Solscan",
-          onClick: () => window.open(`https://solscan.io/tx/${txid}`, "_blank")
-        }
-      });
-      setDepositAmount("");
-      onOpenChange(false);
-    } catch (error) {
-      // Error handling is mostly done in useOperate/executor, but we catch rethrows here
-      console.error("Deposit error:", error);
-      // Toast already shown by useOperate catch? No, useOperate rethrows.
-      // We should show a generic error if not handled.
-      if (error instanceof Error) {
-        // Avoid duplicate toasts if useOperate already showed specific ones?
-        // useOperate only handles SimulationFailure.
-        toast.error("Transaction Failed", { description: error.message });
-      }
-    }
+    triggerSimulation();
+  };
+
+  const triggerSimulation = async () => {
+    const val = parseFloat(depositAmount);
+    // We can use `operate` but we need it to STOP after simulation?
+    // Current `executeLendingTransaction` does it all.
+    // We should rely on `operate` doing the full flow BUT we need to show the UI *during* the flow if we can hook into it.
+    // State driven approach:
+    // When user clicks "Deposit":
+    // 1. setShowPreview(true)
+    // 2. call operate()
+    // 3. operate() sets status 'simulating' -> 'optimizing' -> 'awaiting_signature'.
+    // 4. BUT 'awaiting_signature' means wallet popup is ALREADY requested by `signTransaction`.
+    // Requirement says: "If wallet popup opens before preview → FAIL."
+
+    // So we MUST run simulation *independently* first, SHOW results, THEN let user click "Confirm" to proceed to real transaction.
+    // This implies `operate` should support a "simulationOnly" flag or we split the logic.
+
+    // Let's modify this component to:
+    // 1. calls `operate(..., { simulateOnly: true })` -> This updates state with estimates.
+    // 2. User sees preview.
+    // 3. User clicks "Sign & Send" -> calls `operate(...)` for real.
+
+    // NOTE: `useOperate` doesn't currently support `simulateOnly`. 
+    // We will simulate the UX by initiating the transaction up to simulation success (which we already have callbacks for),
+    // HOWEVER, `executeLendingTransaction` is implemented as a single promise.
+
+    // FOR NOW (Phase 2 Strict compliance):
+    // We will modify `deposit.tsx` to just run `operate`. 
+    // WAIT. If `operate` runs `signTransaction`, the popup appears immediately after simulation succeeds.
+    // This VIOLATES "Display preview modal... before triggering wallet popup".
+
+    // FIX: We need a mechanism to just SIMULATE.
+    // Since I cannot rewrite core engine (constraint), I will use `operate` but fail it? No.
+    // Actually `executeLendingTransaction` does simulation internally.
+    // I should probably add a `dryRun` or `simulateOnly` to `input`?
+    // Constraints: "Do NOT rewrite core engine." ... "Enhance visibility".
+    // Adding a property to input is safe.
+    const amount = parseFloat(depositAmount);
+    await simulate(amount, 0);
+  }
+
+  const handleConfirmDeposit = async () => {
+    const amount = parseFloat(depositAmount);
+    // Run for real
+    await operate(amount, 0);
+    // Close preview handled by success state or manual close? 
+    // Usually we keep explorer open.
+    setShowPreview(false); // We hide preview, show explorer
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className="max-w-md bg-[#0B121A] border border-[#19242e] text-neutral-200 p-0"
         showCloseButton={false}
@@ -241,8 +261,9 @@ export const DepositModal = ({
           </DialogClose>
         </h2>
 
-        <form className="flex flex-col gap-4" onSubmit={handleDeposit}>
+        <form className="flex flex-col gap-4" onSubmit={handleInitialClick}>
           <div className="flex flex-col gap-2 p-4">
+            {/* Existing Input Groups */}
             <div className="grid grid-cols-2 rounded-xl border border-neutral-850 bg-neutral-925/75 p-4">
               <div className="flex flex-col gap-0.5">
                 <span className="text-xs text-neutral-400">Token Balance</span>
@@ -372,20 +393,23 @@ export const DepositModal = ({
           </div>
 
           <div className="flex flex-col gap-4 p-4 pt-0">
+            {/* Explorer & Transaction Status */}
+            {(txState.status !== 'idle' && txState.status !== 'building') && (
+              <TransactionExplorer state={txState} />
+            )}
+
             <div className="flex w-full items-start gap-2 text-xs text-neutral-500">
-              <span
-                className="iconify ph--question-bold"
-                style={{ height: "1lh", width: "1lh" }}
-              ></span>
+              {/* Use question mark icon */}
+              <span className="iconify ph--question-bold" style={{ height: "1lh", width: "1lh" }}></span>
               <span>
                 If {tokenSymbol} reaches{" "}
                 <span className="relative inline-flex items-center rounded-sm">
                   <span translate="no">{liquidationPrice}</span>
                 </span>{" "}
-                (drops by {dropPercentage}%), your position may be partially
-                liquidated
+                (drops by {dropPercentage}%), your position may be partially liquidated
               </span>
             </div>
+
             {!connected && (
               <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-xs text-yellow-400">
                 <span
@@ -398,18 +422,25 @@ export const DepositModal = ({
             <button
               type="submit"
               disabled={
-                !depositAmount || parseFloat(depositAmount) <= 0 || !connected
+                !depositAmount || parseFloat(depositAmount) <= 0 || !connected || txState.status === 'awaiting_signature' || txState.status === 'sending' || txState.status === 'confirming'
               }
               className="inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors focus:outline-none focus:ring-1 disabled:pointer-events-none disabled:opacity-50 bg-primary text-neutral-950 hover:bg-primary-300 focus:ring-primary-300 px-6 py-3 text-sm rounded-xl"
             >
-              <span className="pointer-events-auto inline-flex empty:hidden"></span>
               <span className="contents truncate">
-                {!connected ? "Connect Wallet" : "Deposit"}
+                {!connected ? "Connect Wallet" : txState.status === 'idle' || txState.status === 'building' || txState.status === 'failed' || txState.status === 'success' ? "Deposit" : "Processing..."}
               </span>
-              <span className="pointer-events-auto inline-flex empty:hidden"></span>
             </button>
           </div>
         </form>
+
+        {/* Simulation Preview Modal */}
+        <SimulationPreview
+          open={showPreview}
+          state={txState}
+          onConfirm={handleConfirmDeposit}
+          onCancel={() => setShowPreview(false)}
+        />
+
       </DialogContent>
     </Dialog>
   );

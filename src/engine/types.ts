@@ -14,6 +14,7 @@ export interface LendingTransactionInput {
     computeUnits?: number;
     preInstructions?: TransactionInstruction[];
     postInstructions?: TransactionInstruction[];
+    simulateOnly?: boolean;
 }
 
 export interface ComputedTransaction {

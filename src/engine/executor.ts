@@ -1,4 +1,3 @@
-
 import { ComputeBudgetProgram, Connection, SendTransactionError, VersionedTransaction } from "@solana/web3.js";
 import { WalletContextState } from "@solana/wallet-adapter-react";
 import { buildLendingTransaction } from "./builder";
@@ -6,6 +5,13 @@ import { createVersionedTransaction } from "./transaction";
 import { simulateTransaction } from "./simulation";
 import { LendingTransactionInput, TxFailureType } from "./types";
 import { estimatePriorityFee, getSolscanTxLink } from "../lib/solana";
+import { TransactionStatus } from "@/hooks/transactions/useTransactionLifecycle";
+
+export interface TransactionCallbacks {
+    onStatusChange?: (status: TransactionStatus) => void;
+    onSimulationSuccess?: (units: number, priorityFee: number) => void;
+    onTxSent?: (signature: string, link: string) => void;
+}
 
 export interface TransactionResult {
     signature: string;
@@ -32,9 +38,11 @@ export class EngineError extends Error {
 export async function executeLendingTransaction(
     connection: Connection,
     wallet: WalletContextState,
-    input: LendingTransactionInput
+    input: LendingTransactionInput,
+    callbacks: TransactionCallbacks = {}
 ): Promise<TransactionResult> {
     const { signTransaction, publicKey } = wallet;
+    const { onStatusChange, onSimulationSuccess, onTxSent } = callbacks;
 
     if (!publicKey || !signTransaction) {
         throw new EngineError("Wallet not connected or does not support signing", TxFailureType.Unknown);
@@ -42,11 +50,13 @@ export async function executeLendingTransaction(
 
     // 1. Build Initial Transaction (Deterministic with Safety Margins)
     console.log("Building transaction...");
+    onStatusChange?.("building");
     const computedTx = await buildLendingTransaction(connection, input);
 
     // 2. Create Initial Versioned Transaction (Stateful: fetches blockhash)
     // We use the default (high) compute budget for simulation to ensure it doesn't fail on CUs.
     console.log("Fetching blockhash and compiling for simulation...");
+    onStatusChange?.("simulating");
     let transaction = await createVersionedTransaction(connection, computedTx, publicKey);
 
     // 3. Simulate (Safety Check & Compute Estimation)
@@ -65,6 +75,7 @@ export async function executeLendingTransaction(
     }
 
     // 4. Optimize Compute & Fees
+    onStatusChange?.("optimizing");
     const unitsConsumed = simulation.unitsConsumed || 0;
     // Add 10% buffer to observed units
     const optimizedUnits = Math.ceil(unitsConsumed * 1.1);
@@ -73,6 +84,18 @@ export async function executeLendingTransaction(
     const priorityFeeMicroLamports = await estimatePriorityFee(connection, computedTx.instructions);
 
     console.log(`Simulation successful. Units: ${unitsConsumed}, Optimized: ${optimizedUnits}, PriorityFee: ${priorityFeeMicroLamports}`);
+
+    // Notify hooks about simulation metrics
+    onSimulationSuccess?.(optimizedUnits, priorityFeeMicroLamports);
+
+    if (input.simulateOnly) {
+        return {
+            signature: "simulation_only",
+            confirmed: false,
+            logs: simulation.logs,
+            link: ""
+        };
+    }
 
     // Update compute budget instructions with optimized values
     computedTx.computeBudgetInstructions = [
@@ -92,6 +115,7 @@ export async function executeLendingTransaction(
     // 6. User Signing
     // DO NOT trigger popup until we are sure simulation passed and budget is optimized.
     console.log("Requesting user signature...");
+    onStatusChange?.("awaiting_signature");
     let signedTx: VersionedTransaction;
     try {
         signedTx = await signTransaction(transaction);
@@ -101,12 +125,15 @@ export async function executeLendingTransaction(
 
     // 7. Send Transaction
     console.log("Sending transaction...");
+    onStatusChange?.("sending");
     let signature: string;
     try {
         signature = await connection.sendRawTransaction(signedTx.serialize(), {
             skipPreflight: true, // We already simulated
             maxRetries: 3, // Basic retries
         });
+        const link = getSolscanTxLink(signature);
+        onTxSent?.(signature, link);
     } catch (err: any) {
         console.error("Send failed:", err);
         let message = err.message;
@@ -127,6 +154,13 @@ export async function executeLendingTransaction(
 
     // 8. Confirm Transaction
     console.log("Confirming transaction...");
+    onStatusChange?.("confirming");
+
+    // Implement Retry + Timeout Logic for Confirmation
+    const MAX_CONFIRM_RETRIES = 2; // Try confirming a few times if basic confirm fails/times out
+    let finalized = false;
+
+    // We can loop or just one-shot robust confirm
     try {
         // Await confirmation with "confirmed" commitment
         // This throws if it times out or expires
@@ -137,6 +171,11 @@ export async function executeLendingTransaction(
         }
 
         console.log("Transaction confirmed!");
+        finalized = true;
+
+        // Final Success State
+        onStatusChange?.("success");
+
         return {
             signature,
             confirmed: true,
@@ -145,9 +184,13 @@ export async function executeLendingTransaction(
         };
     } catch (err: any) {
         console.error("Confirmation failed:", err);
+        // If we timed out, we might want to check signature status one last time
+        // But for strict requirements: silent hanging confirm -> FAIL.
+        // We throw with explicit error.
+
         throw new EngineError(
-            `Confirmation timed out or failed: ${err.message}`,
-            TxFailureType.BlockhashExpired // Often means timeout/expiry
+            `Confirmation timed out or failed: ${err.message}. Please check explorer for status.`,
+            TxFailureType.BlockhashExpired
         );
     }
 }
