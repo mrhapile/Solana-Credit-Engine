@@ -162,7 +162,13 @@ export async function executeLendingTransaction(
 
     try {
         const confirmation = await safeRpcCall(async () => {
-            return await connection.confirmTransaction(signature, "confirmed");
+            // Explicitly force 'confirmed' commitment regardless of connection default
+            const latestBlockhash = await connection.getLatestBlockhash("confirmed");
+            return await connection.confirmTransaction({
+                signature,
+                blockhash: latestBlockhash.blockhash,
+                lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+            }, "confirmed");
         }, { context: 'confirmTransaction' });
 
         if (confirmation.value.err) {

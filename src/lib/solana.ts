@@ -1,16 +1,16 @@
-
 import { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { getMint } from "@solana/spl-token";
+import { safeRpcCall } from "./rpcGuard";
 
-// Cache decimals to avoid repeated RPC calls for known tokens
+// ── Mint-Decimal Cache ────────────────────────────────────────
+// In-memory Map. Pre-seeded with known tokens; never fetches same mint twice.
 const decimalsCache = new Map<string, number>();
-
-// Pre-fill with known tokens if desired, but we will fetch dynamically
-decimalsCache.set("So11111111111111111111111111111111111111112", 9); // WSOL
+decimalsCache.set("So11111111111111111111111111111111111111112", 9);  // WSOL
 decimalsCache.set("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6); // USDC
 
 /**
  * Fetches mint decimals dynamically and caches the result.
+ * Never fetches the same mint twice thanks to in-memory Map.
  */
 export async function getMintDecimals(connection: Connection, mint: PublicKey): Promise<number> {
     const mintStr = mint.toBase58();
@@ -28,9 +28,7 @@ export async function getMintDecimals(connection: Connection, mint: PublicKey): 
     }
 }
 
-/**
- * Validates the RPC URL environment variable.
- */
+// ── RPC URL ───────────────────────────────────────────────────
 export function getRpcUrl(): string {
     const url = process.env.NEXT_PUBLIC_SOLANA_RPC_URL;
     if (!url) {
@@ -39,33 +37,26 @@ export function getRpcUrl(): string {
     return url;
 }
 
-/**
- * Constructs a Solscan link for a transaction.
- */
+// ── Solscan Link ──────────────────────────────────────────────
 export function getSolscanTxLink(signature: string): string {
-    return `https://solscan.io/tx/${signature}`; // Defaults to mainnet
+    return `https://solscan.io/tx/${signature}`;
 }
 
+// ── Connection Singleton ──────────────────────────────────────
+// Defaults to "processed" for lighter read-only queries.
+// confirmTransaction callers explicitly pass "confirmed".
 let connection: Connection | null = null;
 
 export function getConnection(): Connection {
     if (connection) return connection;
-    connection = new Connection(getRpcUrl(), "confirmed");
+    connection = new Connection(getRpcUrl(), "processed");
     return connection;
 }
 
-/**
- * Estimates a priority fee based on the recent prioritization fees for the accounts involved.
- * Strategies:
- * - 'median': The median of the recent fees.
- * - 'max': The maximum of the recent fees.
- * - 'average': The average.
- * We'll use a 75th percentile strategy to be safe but not overpay, bounded by a reasonable max.
- */
-import { safeRpcCall } from "./rpcGuard";
-
+// ── Priority Fee Estimation ───────────────────────────────────
+// Cached for 60s. Only called during transaction simulation (never on page load).
 let priorityFeeCache: { fee: number; timestamp: number } | null = null;
-const FEE_CACHE_TTL = 60000; // 60s
+const FEE_CACHE_TTL = 60_000;
 const DEFAULT_FEE = 1000;
 
 export async function estimatePriorityFee(
@@ -74,55 +65,47 @@ export async function estimatePriorityFee(
 ): Promise<number> {
     const now = Date.now();
 
-    // 1. Check Cache
-    if (priorityFeeCache && (now - priorityFeeCache.timestamp < FEE_CACHE_TTL)) {
-        console.debug("Using cached priority fee:", priorityFeeCache.fee);
+    // 1. Return cached value if fresh
+    if (priorityFeeCache && now - priorityFeeCache.timestamp < FEE_CACHE_TTL) {
+        console.debug("[Priority Fee] Using cached fee:", priorityFeeCache.fee);
         return priorityFeeCache.fee;
     }
 
     try {
-        // Detailed logic to extract writable accounts
+        // Extract unique writable accounts + program IDs
         const accounts = new Set<string>();
         for (const ix of instructions) {
             for (const key of ix.keys) {
-                if (key.isWritable) {
-                    accounts.add(key.pubkey.toBase58());
-                }
+                if (key.isWritable) accounts.add(key.pubkey.toBase58());
             }
             accounts.add(ix.programId.toBase58());
         }
 
-        const accountKeys = Array.from(accounts).map(k => new PublicKey(k));
-        const limitedKeys = accountKeys.slice(0, 128);
+        const limitedKeys = Array.from(accounts)
+            .slice(0, 128)
+            .map(k => new PublicKey(k));
 
-        // 2. Use RPC Guard
+        // 2. Fetch via RPC Guard (spacing + retry + 429 protection)
         const fee = await safeRpcCall(async () => {
             const fees = await connection.getRecentPrioritizationFees({
-                lockedWritableAccounts: limitedKeys
+                lockedWritableAccounts: limitedKeys,
             });
 
             if (fees.length === 0) return DEFAULT_FEE;
 
-            // Sort fees by prioritizationFee
-            const sortedFees = fees
-                .map(f => f.prioritizationFee)
-                .sort((a, b) => a - b);
-
-            // 75th percentile
-            const index = Math.floor(sortedFees.length * 0.75);
-            return Math.max(sortedFees[index], DEFAULT_FEE);
+            const sorted = fees.map(f => f.prioritizationFee).sort((a, b) => a - b);
+            const p75 = Math.floor(sorted.length * 0.75);
+            return Math.max(sorted[p75], DEFAULT_FEE);
         }, {
             context: 'estimatePriorityFee',
-            fallbackValue: priorityFeeCache?.fee || DEFAULT_FEE
+            fallbackValue: priorityFeeCache?.fee || DEFAULT_FEE,
         });
 
-        // 3. Update Cache
+        // 3. Update cache
         priorityFeeCache = { fee, timestamp: now };
         return fee;
-
     } catch (e) {
-        console.warn("Failed to estimate priority fee, defaulting.", e);
+        console.warn("[Priority Fee] Estimation failed, using fallback.", e);
         return priorityFeeCache?.fee || DEFAULT_FEE;
     }
 }
-

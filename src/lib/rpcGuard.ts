@@ -1,8 +1,20 @@
-import { Connection } from "@solana/web3.js";
+/**
+ * rpcGuard.ts — Centralized RPC call wrapper.
+ *
+ * Features:
+ *   • Global 200ms spacing between heavy RPC calls (prevents burst concurrency)
+ *   • Max 2 retries with exponential back-off (500ms base)
+ *   • Immediate stop on 429 rate-limit errors (no aggressive retry)
+ *   • Optional fallback value when errors are recoverable
+ */
 
 // Global retry configuration
 const MAX_RETRIES = 2;
 const INITIAL_BACKOFF_MS = 500;
+
+// Spacing guard — enforces min 200ms gap between outbound heavy RPC calls
+const SPACING_MS = 200;
+let lastRpcCallTime = 0;
 
 class RpcError extends Error {
     public code?: number;
@@ -16,12 +28,6 @@ class RpcError extends Error {
     }
 }
 
-/**
- * Wraps an RPC call with retry logic and rate limit protection.
- * 
- * @param fn The async function to execute.
- * @param options configuration options.
- */
 export async function safeRpcCall<T>(
     fn: () => Promise<T>,
     options: {
@@ -29,41 +35,58 @@ export async function safeRpcCall<T>(
         context?: string;
     } = {}
 ): Promise<T> {
+    // ── Spacing Guard ──────────────────────────────────────────
+    const now = Date.now();
+    const gap = now - lastRpcCallTime;
+    if (gap < SPACING_MS) {
+        await new Promise(resolve => setTimeout(resolve, SPACING_MS - gap));
+    }
+    lastRpcCallTime = Date.now();
+
+    // ── Retry Loop ─────────────────────────────────────────────
     let attempt = 0;
 
     while (attempt <= MAX_RETRIES) {
         try {
-            return await fn();
+            const result = await fn();
+            lastRpcCallTime = Date.now(); // update after completion to space next call
+            return result;
         } catch (error: any) {
-            // Analyze error
-            const isRateLimit = error?.message?.includes('429') || error?.code === 429;
+            const isRateLimit =
+                error?.message?.includes('429') || error?.code === 429;
 
+            // ── 429: Stop immediately, surface user-friendly message ──
             if (isRateLimit) {
-                console.warn(`[RPC Guard] Rate limit hit in ${options.context || 'operation'}. Stopping retries.`);
-                if (options.fallbackValue !== undefined) {
-                    return options.fallbackValue;
-                }
-                throw new RpcError("RPC rate limit reached. Please retry in a few seconds.", 429);
+                console.warn(
+                    `[RPC Guard] 429 rate limit in ${options.context || 'operation'}. Halting retries.`
+                );
+                if (options.fallbackValue !== undefined) return options.fallbackValue;
+                throw new RpcError(
+                    'RPC rate limit reached. Please retry in a few seconds.',
+                    429
+                );
             }
 
-            // If it's the last attempt or a non-retriable error (e.g. strict simulation failure), throw
+            // ── Last attempt or non-retriable → throw / fallback ──
             if (attempt === MAX_RETRIES) {
-                console.error(`[RPC Guard] Max retries reached for ${options.context || 'operation'}:`, error);
-                if (options.fallbackValue !== undefined) {
-                    return options.fallbackValue;
-                }
+                console.error(
+                    `[RPC Guard] Max retries (${MAX_RETRIES}) for ${options.context || 'operation'}:`,
+                    error
+                );
+                if (options.fallbackValue !== undefined) return options.fallbackValue;
                 throw error;
             }
 
-            // Exponential backoff
+            // ── Backoff before next attempt ──
             const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
-            console.warn(`[RPC Guard] Retrying ${options.context || 'operation'} in ${delay}ms... (Attempt ${attempt + 1}/${MAX_RETRIES})`);
+            console.warn(
+                `[RPC Guard] Retry ${options.context || 'op'} in ${delay}ms (${attempt + 1}/${MAX_RETRIES})`
+            );
             await new Promise(resolve => setTimeout(resolve, delay));
-
             attempt++;
         }
     }
 
-    // Should not be reachable
-    throw new Error("Unexpected RPC Guard exit");
+    // Unreachable
+    throw new Error('Unexpected RPC Guard exit');
 }
