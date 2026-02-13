@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Image from "next/image";
 import { useWallet } from "@solana/wallet-adapter-react";
 import {
@@ -12,6 +12,13 @@ import {
 import { toast } from "sonner";
 import { useOperate } from "@/hooks/useOperate";
 import { createCloseAccountInstruction, getAssociatedTokenAddressSync, NATIVE_MINT } from "@solana/spl-token";
+import { SimulationPreview } from "@/components/ui/transactions/SimulationPreview";
+import { TransactionExplorer } from "@/components/ui/transactions/TransactionExplorer";
+import { calculateProjectedRisk, getRiskColor, RiskMetrics } from "@/engine/risk";
+import { SOL_DECIMALS, USDC_DECIMALS, SOL_MINT, LIQUIDATION_THRESHOLDS } from "@/engine/constants";
+import { usePosition } from "@/hooks/usePosition";
+import { useSolPrice } from "@/hooks/useSolPrice";
+import { getConnection, getMintDecimals } from "@/lib/solana";
 
 interface WithdrawModalProps {
   open: boolean;
@@ -41,149 +48,143 @@ export const WithdrawModal = ({
   borrowedAmountFiat = "$0.00",
 }: WithdrawModalProps) => {
   const [withdrawAmount, setWithdrawAmount] = useState("");
-  const [riskPercentage, setRiskPercentage] = useState(0);
+  // const [riskPercentage, setRiskPercentage] = useState(0); // Derived from metrics
+
   const { connected, publicKey } = useWallet();
-  const { operate } = useOperate(vaultId, positionId);
+  const { operate, simulate, state: txState, reset: txReset } = useOperate(vaultId, positionId);
+  const { position } = usePosition(vaultId, positionId);
+  const { price: solPrice, loading: priceLoading } = useSolPrice();
+
+  const [decimals, setDecimals] = useState(9); // Default SOL
+  const [showPreview, setShowPreview] = useState(false);
+
+  // Fetch actual wallet decimals if needed, though for Withdraw we mostly need Position decimals.
+  // We assume updated position has correct mints? No, position has raw amounts.
+  // We need decimals to interpret user input.
+  useEffect(() => {
+    (async () => {
+      try {
+        const conn = getConnection();
+        const mintDecimals = await getMintDecimals(conn, NATIVE_MINT);
+        setDecimals(mintDecimals);
+      } catch (e) { console.error(e); }
+    })();
+  }, []);
+
+  const handleOpenChange = (isOpen: boolean) => {
+    onOpenChange(isOpen);
+    if (!isOpen) {
+      setTimeout(() => {
+        setWithdrawAmount("");
+        txReset();
+        setShowPreview(false);
+      }, 300);
+    }
+  };
+
+  // Calculate Risk Metrics
+  const riskMetrics = React.useMemo(() => {
+    if (!position || !solPrice) return null;
+
+    const amount = parseFloat(withdrawAmount);
+    return calculateProjectedRisk({
+      currentCollateralAmount: position.colRaw,
+      currentDebtAmount: position.debtRaw,
+      collateralDecimals: decimals,
+      debtDecimals: USDC_DECIMALS,
+      collateralPrice: solPrice,
+      debtPrice: 1, // Stable
+      liquidationThreshold: LIQUIDATION_THRESHOLDS[SOL_MINT] || 0.8,
+      operation: 'withdraw',
+      amount: isNaN(amount) ? 0 : amount
+    });
+  }, [position, solPrice, withdrawAmount, decimals]);
+
+  const displayRiskPercentage = riskMetrics ? Math.min(100, Math.round((1 / riskMetrics.projectedHF) * 100)) : 0;
 
   const handleHalf = () => {
     const balance = parseFloat(suppliedAmount.split(" ")[0]);
-    setWithdrawAmount((balance / 2).toFixed(8));
-    setRiskPercentage(0);
+    setWithdrawAmount((balance / 2).toFixed(decimals > 6 ? 6 : decimals));
   };
 
   const handleMax = () => {
-    const balance = suppliedAmount.split(" ")[0];
+    const balance = suppliedAmount.split(" ")[0]; // UI prop usually has "14.14 SOL"
     setWithdrawAmount(balance);
-    setRiskPercentage(0);
   };
 
-  const handleWithdrawAmountChange = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const handleWithdrawAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setWithdrawAmount(value);
-    setRiskPercentage(0);
   };
 
   const getRiskStatus = () => {
-    if (riskPercentage < 50)
-      return {
-        text: "Safe",
-        color: "text-emerald-400",
-        bgColor: "bg-emerald-400/20",
-        progressColor: "bg-emerald",
-      };
-    if (riskPercentage < 80)
-      return {
-        text: "Risky",
-        color: "text-orange-400",
-        bgColor: "bg-orange-400/20",
-        progressColor: "bg-orange-500",
-      };
-    return {
-      text: "Very Risky",
-      color: "text-red-400",
-      bgColor: "bg-red-400/20",
-      progressColor: "bg-red-500",
-    };
+    if (!riskMetrics) return { text: "-", color: "text-neutral-500", bgColor: "bg-neutral-800", progressColor: "bg-neutral-500" };
+    switch (riskMetrics.riskLevel) {
+      case "safe": return { text: "Safe", color: "text-emerald-400", bgColor: "bg-emerald-400/20", progressColor: "bg-emerald-400" };
+      case "moderate": return { text: "Moderate", color: "text-yellow-400", bgColor: "bg-yellow-400/20", progressColor: "bg-yellow-400" };
+      case "high": return { text: "High Risk", color: "text-orange-500", bgColor: "bg-orange-500/20", progressColor: "bg-orange-500" };
+      case "liquidation": return { text: "Liquidation Risk", color: "text-red-500", bgColor: "bg-red-500/20", progressColor: "bg-red-500" };
+    }
   };
 
   const riskStatus = getRiskStatus();
-  const liquidationPrice = "0.00 USDC";
-  const dropPercentage = "100%";
+  const liquidationPriceStr = riskMetrics ? `$${riskMetrics.liquidationPrice.toFixed(2)}` : "$0.00";
+  const dropPercentageStr = riskMetrics ? `${riskMetrics.percentDropToLiquidation.toFixed(1)}%` : "0%";
 
   const calculateFiatValue = () => {
     if (!withdrawAmount || parseFloat(withdrawAmount) <= 0) return "$0.00";
-    const tokenValue = parseFloat(
-      suppliedAmountFiat.replace("$", "").replace(",", "")
-    );
-    const tokenAmount = parseFloat(suppliedAmount.split(" ")[0]);
-    const withdrawValue =
-      (parseFloat(withdrawAmount) / tokenAmount) * tokenValue;
-    return `$${withdrawValue.toFixed(5)}`;
+    if (priceLoading || !solPrice) return "$0.00";
+    // Fallback to UI props logic if needed? No, use live price.
+    const val = parseFloat(withdrawAmount) * solPrice;
+    return `$${val.toFixed(2)}`;
   };
 
-  const handleWithdraw = async (e: React.FormEvent) => {
+  // Simulation / Execution Flow
+  const getPostInstructions = () => {
+    if (!publicKey) return [];
+    const wsolAccount = getAssociatedTokenAddressSync(NATIVE_MINT, publicKey);
+    return [
+      createCloseAccountInstruction(wsolAccount, publicKey, publicKey)
+    ];
+  };
+
+  const handleInitialClick = (e: React.FormEvent) => {
     e.preventDefault();
-
     if (!connected || !publicKey) {
-      toast.error("Wallet Not Connected", {
-        description:
-          "Please connect your wallet to proceed with the withdrawal.",
-      });
+      toast.error("Wallet Not Connected");
       return;
     }
-
     const amount = parseFloat(withdrawAmount);
-
-    if (isNaN(amount)) {
-      toast.error("Invalid Amount", {
-        description: "Please enter a valid withdrawal amount.",
-      });
+    if (isNaN(amount) || amount <= 0) {
+      toast.error("Invalid Amount");
       return;
     }
-
-    if (amount <= 0) {
-      toast.error("Invalid Amount", {
-        description: "Withdrawal amount must be greater than 0.",
-      });
-      return;
-    }
-
     const availableBalance = parseFloat(suppliedAmount.split(" ")[0]);
     if (amount > availableBalance) {
-      toast.error("Insufficient Collateral", {
-        description: `You cannot withdraw more than your supplied collateral of ${availableBalance} ${tokenSymbol}.`,
-      });
+      toast.error("Insufficient Collateral");
       return;
     }
 
-    try {
-      toast.info("Processing Withdrawal", {
-        description: "Please confirm the transaction in your wallet...",
-      });
+    triggerSimulation();
+  };
 
-      const wsolAccount = getAssociatedTokenAddressSync(NATIVE_MINT, publicKey);
-      const postInstructions = [];
+  const triggerSimulation = async () => {
+    const amount = parseFloat(withdrawAmount);
+    const postInstr = getPostInstructions();
+    // negative amount for withdraw
+    await simulate(-amount, 0, [], postInstr);
+    setShowPreview(true); // Should set true even if waiting? No await finishes when simulation done.
+  };
 
-      // If token is SOL (NATIVE_MINT), we should close the account to unwrap
-      // This logic assumes we are handling SOL. Ideally we check tokenSymbol or mint.
-      // For now, consistent with previous behavior, we add close instruction.
-      postInstructions.push(
-        createCloseAccountInstruction(
-          wsolAccount,
-          publicKey, // destination for sol to reach
-          publicKey // authority
-        )
-      );
-
-      // Pass negative amount for withdrawal, natural units
-      // Pass empty preInstructions
-      // Pass postInstructions as 4th argument
-      const txid = await operate(-amount, 0, [], postInstructions);
-
-      toast.success("Withdrawal Successful!", {
-        description: `Successfully withdrew ${amount.toFixed(
-          6
-        )} ${tokenSymbol}.`,
-        action: {
-          label: "View on Solscan",
-          onClick: () => window.open(`https://solscan.io/tx/${txid}`, "_blank")
-        }
-      });
-      setWithdrawAmount("");
-      onOpenChange(false);
-    } catch (error) {
-      // Error handling delegated to engine/toast
-      console.error("Withdraw error:", error);
-      if (error instanceof Error) {
-        toast.error("Transaction Failed", { description: error.message });
-      }
-    }
+  const handleConfirmWithdraw = async () => {
+    const amount = parseFloat(withdrawAmount);
+    const postInstr = getPostInstructions();
+    await operate(-amount, 0, [], postInstr);
+    setShowPreview(false);
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className="max-w-md bg-[#0B121A] border border-[#19242e] text-neutral-200 p-0"
         showCloseButton={false}
@@ -207,9 +208,12 @@ export const WithdrawModal = ({
           </DialogClose>
         </h2>
 
-        <form className="flex flex-col gap-4" onSubmit={handleWithdraw}>
+        <form className="flex flex-col gap-4" onSubmit={handleInitialClick}>
+
           <div className="flex flex-col gap-2 p-4">
+            {/* Existing Inputs Block */}
             <div className="grid grid-cols-2 rounded-xl border border-neutral-850 bg-neutral-925/75 p-4">
+              {/* ... (Kept existing structure for tokens display) ... */}
               <div className="flex flex-col gap-0.5">
                 <span className="text-xs text-neutral-400">Supplied</span>
                 <div className="flex flex-col text-lg">
@@ -302,56 +306,84 @@ export const WithdrawModal = ({
           </div>
 
           <div className="border-y border-neutral-850 p-4">
+            {/* New Risk Section */}
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between font-semibold">
-                <span className="text-neutral-200">{riskPercentage}%</span>
+                <span className="text-neutral-200">{displayRiskPercentage}% Risk</span>
                 <span className={riskStatus.color}>{riskStatus.text}</span>
               </div>
+
+              {/* Progress Bar */}
               <div className="flex flex-col items-center gap-2">
                 <div
                   role="progressbar"
                   aria-valuemax={100}
                   aria-valuemin={0}
-                  aria-valuenow={riskPercentage}
-                  aria-valuetext={`${riskPercentage}%`}
+                  aria-valuenow={displayRiskPercentage}
                   data-state="loading"
-                  data-value={riskPercentage}
-                  data-max={100}
                   className={`relative h-1.5 w-full overflow-hidden rounded-xl ${riskStatus.bgColor}`}
                   style={{ transform: "translateY(0px)" }}
                 >
                   <div
-                    data-state="loading"
-                    data-value={riskPercentage}
-                    data-max={100}
                     className={`h-full w-full ${riskStatus.progressColor}`}
                     style={{
-                      transform: `translateX(-${100 - riskPercentage}%)`,
+                      transform: `translateX(-${100 - displayRiskPercentage}%)`,
                     }}
                   />
                 </div>
                 <span className="ml-auto text-xs text-neutral-500">
-                  Max: L.T. 80%
+                  Liquidation at 100%
                 </span>
               </div>
+
+              {/* Projection Details */}
+              {riskMetrics && (
+                <div className="grid grid-cols-2 gap-4 mt-2 text-xs">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-neutral-500">Health Factor</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-neutral-400">{riskMetrics.currentHF === Infinity ? "∞" : riskMetrics.currentHF.toFixed(2)}</span>
+                      <span className="iconify ph--arrow-right text-neutral-600"></span>
+                      <span className={`font-semibold ${riskMetrics.projectedHF < riskMetrics.currentHF ? 'text-orange-400' : 'text-emerald-400'}`}>
+                        {riskMetrics.projectedHF === Infinity ? "∞" : riskMetrics.projectedHF.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1 text-right">
+                    <span className="text-neutral-500">LTV</span>
+                    <div className="flex items-center justify-end gap-1">
+                      <span className="text-neutral-400">{(riskMetrics.currentLTV * 100).toFixed(1)}%</span>
+                      <span className="iconify ph--arrow-right text-neutral-600"></span>
+                      <span className="font-semibold text-neutral-200">{(riskMetrics.projectedLTV * 100).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-neutral-500">Liq. Price</span>
+                    <span className="font-mono text-neutral-200">{liquidationPriceStr}</span>
+                  </div>
+                  <div className="flex flex-col gap-1 text-right">
+                    <span className="text-neutral-500">Drop Buffer</span>
+                    <span className="font-mono text-neutral-200">{dropPercentageStr}</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
           <div className="flex flex-col gap-4 p-4 pt-0">
+            {/* Explorer & Transaction Status */}
+            {(txState.status !== 'idle' && txState.status !== 'building') && (
+              <TransactionExplorer state={txState} />
+            )}
+
             <div className="flex w-full items-start gap-2 text-xs text-neutral-500">
-              <span
-                className="iconify ph--question-bold"
-                style={{ height: "1lh", width: "1lh" }}
-              ></span>
+              <span className="iconify ph--question-bold" style={{ height: "1lh", width: "1lh" }}></span>
               <span>
-                If {tokenSymbol} reaches{" "}
-                <span className="relative inline-flex items-center rounded-sm">
-                  <span translate="no">{liquidationPrice}</span>
-                </span>{" "}
-                (drops by {dropPercentage}%), your position may be partially
-                liquidated
+                Based on current market conditions.
+                Liquidation occurs if {tokenSymbol} drops to <span className="text-neutral-300">{liquidationPriceStr}</span>.
               </span>
             </div>
+
             {!connected && (
               <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-xs text-yellow-400">
                 <span
@@ -366,18 +398,25 @@ export const WithdrawModal = ({
             <button
               type="submit"
               disabled={
-                !withdrawAmount || parseFloat(withdrawAmount) <= 0 || !connected
+                !withdrawAmount || parseFloat(withdrawAmount) <= 0 || !connected || txState.status === 'awaiting_signature' || txState.status === 'sending' || txState.status === 'confirming'
               }
               className="inline-flex items-center justify-center gap-1.5 font-medium transition-colors focus:outline-none focus:ring-1 disabled:pointer-events-none disabled:opacity-50 bg-primary text-neutral-950 hover:bg-primary-300 focus:ring-primary-300 px-6 py-3 text-sm rounded-xl"
             >
-              <span className="pointer-events-auto inline-flex empty:hidden"></span>
               <span className="contents truncate">
-                {!connected ? "Connect Wallet" : "Withdraw"}
+                {!connected ? "Connect Wallet" : txState.status === 'idle' || txState.status === 'building' || txState.status === 'failed' || txState.status === 'success' ? "Withdraw" : "Processing..."}
               </span>
-              <span className="pointer-events-auto inline-flex empty:hidden"></span>
             </button>
           </div>
         </form>
+
+        {/* Simulation Preview Modal */}
+        <SimulationPreview
+          open={showPreview}
+          state={txState}
+          onConfirm={handleConfirmWithdraw}
+          onCancel={() => setShowPreview(false)}
+        />
+
       </DialogContent>
     </Dialog>
   );

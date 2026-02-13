@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { getCurrentPosition } from "@jup-ag/lend/borrow";
 import { getConnection } from "@/lib/solana";
 import { fetchTokenPrices } from "@/lib/prices";
-import { SOL_MINT, USDC_MINT } from "@/engine/constants";
+import { SOL_MINT, USDC_MINT, SOL_DECIMALS, USDC_DECIMALS } from "@/engine/constants";
 import BN from "bn.js";
 
 type PositionState = {
@@ -69,11 +69,11 @@ export function usePosition(vaultId: number, positionId: number) {
 
   const formatted = position
     ? {
-      collateralAmount: position.colRaw.toNumber() / 1_000_000_000,
-      debtAmount: position.debtRaw.toNumber() / 1_000_000,
+      collateralAmount: position.colRaw.toNumber() / Math.pow(10, SOL_DECIMALS), // SOL
+      debtAmount: position.debtRaw.toNumber() / Math.pow(10, USDC_DECIMALS), // USDC
       solPrice,
-      collateralUSD: (position.colRaw.toNumber() / 1_000_000_000) * solPrice,
-      debtUSD: (position.debtRaw.toNumber() / 1_000_000) * usdcPrice,
+      collateralUSD: (position.colRaw.toNumber() / Math.pow(10, SOL_DECIMALS)) * solPrice,
+      debtUSD: (position.debtRaw.toNumber() / Math.pow(10, USDC_DECIMALS)) * usdcPrice,
     }
     : null;
 

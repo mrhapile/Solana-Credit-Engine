@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Image from "next/image";
 import { useWallet } from "@solana/wallet-adapter-react";
+import { PublicKey } from "@solana/web3.js";
 import {
   Dialog,
   DialogContent,
@@ -11,6 +12,13 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { useOperate } from "@/hooks/useOperate";
+import { SimulationPreview } from "@/components/ui/transactions/SimulationPreview";
+import { TransactionExplorer } from "@/components/ui/transactions/TransactionExplorer";
+import { calculateProjectedRisk, getRiskColor, RiskMetrics } from "@/engine/risk";
+import { SOL_DECIMALS, USDC_DECIMALS, SOL_MINT, USDC_MINT, LIQUIDATION_THRESHOLDS } from "@/engine/constants";
+import { usePosition } from "@/hooks/usePosition";
+import { useSolPrice } from "@/hooks/useSolPrice";
+import { getConnection, getMintDecimals } from "@/lib/solana";
 
 interface RepayModalProps {
   open: boolean;
@@ -41,16 +49,46 @@ export const RepayModal = ({
 }: RepayModalProps) => {
   const [repayAmount, setRepayAmount] = useState("");
   const { connected, publicKey } = useWallet();
-  const { operate } = useOperate(vaultId, positionId);
+  const { operate, simulate, state: txState, reset: txReset } = useOperate(vaultId, positionId);
+  const { position } = usePosition(vaultId, positionId);
+  const { price: solPrice, loading: priceLoading } = useSolPrice();
+
+  const [decimals, setDecimals] = useState(6); // Default USDC
+  const [showPreview, setShowPreview] = useState(false);
+
+  // Fetch mint decimals for REPAY asset (USDC usually)
+  useEffect(() => {
+    (async () => {
+      try {
+        const conn = getConnection();
+        const mintDecimals = await getMintDecimals(conn, new PublicKey(USDC_MINT));
+        setDecimals(mintDecimals);
+      } catch (e) { console.error(e); }
+    })();
+  }, []);
+
+  const handleOpenChange = (isOpen: boolean) => {
+    onOpenChange(isOpen);
+    if (!isOpen) {
+      setTimeout(() => {
+        setRepayAmount("");
+        txReset();
+        setShowPreview(false);
+      }, 300);
+    }
+  };
 
   const handleHalf = () => {
+    // We can repay up to Debt Amount or Wallet Balance, whichever is smaller?
+    // Usually "Half" means half of debt? Or half of wallet balance?
+    // Let's assume Half of Debt for now based on previous code relying on `borrowedAmount`.
     const debt = parseFloat(borrowedAmount.split(" ")[0]);
-    setRepayAmount((debt / 2).toFixed(6));
+    setRepayAmount((debt / 2).toFixed(decimals));
   };
 
   const handleMax = () => {
     const debt = parseFloat(borrowedAmount.split(" ")[0]);
-    setRepayAmount(debt.toFixed(6));
+    setRepayAmount(debt.toFixed(decimals));
   };
 
   const handleRepayAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -60,71 +98,78 @@ export const RepayModal = ({
 
   const calculateFiatValue = () => {
     if (!repayAmount || parseFloat(repayAmount) <= 0) return "$0.00";
-    // Simplified fiat calc
     return `$${parseFloat(repayAmount).toFixed(2)}`;
   };
 
-  const handleRepay = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!connected || !publicKey) {
-      toast.error("Wallet Not Connected", {
-        description: "Please connect your wallet.",
-      });
-      return;
-    }
+  // Calculate Risk Metrics
+  const riskMetrics = React.useMemo(() => {
+    if (!position || !solPrice) return null;
 
     const amount = parseFloat(repayAmount);
+    return calculateProjectedRisk({
+      currentCollateralAmount: position.colRaw,
+      currentDebtAmount: position.debtRaw,
+      collateralDecimals: SOL_DECIMALS, // Collateral is SOL
+      debtDecimals: decimals, // Repay asset
+      collateralPrice: solPrice,
+      debtPrice: 1, // USDC
+      liquidationThreshold: LIQUIDATION_THRESHOLDS[SOL_MINT] || 0.8,
+      operation: 'repay',
+      amount: isNaN(amount) ? 0 : amount
+    });
+  }, [position, solPrice, repayAmount, decimals]);
 
-    if (isNaN(amount) || amount <= 0) {
-      toast.error("Invalid Amount", {
-        description: "Please enter a valid amount.",
-      });
-      return;
-    }
+  const displayRiskPercentage = riskMetrics ? Math.min(100, Math.round((1 / riskMetrics.projectedHF) * 100)) : 0;
 
-    // check if repay > borrowed
-    const borrowedAmountNum = parseFloat(borrowedAmount.split(" ")[0]);
-    if (amount > borrowedAmountNum) {
-      toast.error("Amount Exceeds Borrowed Debt", {
-        description: `You cannot repay more than your borrowed amount of ${borrowedAmountNum.toFixed(
-          6
-        )} ${tokenSymbol}. Click MAX to repay all.`,
-        duration: 5000,
-      });
-      return;
-    }
-
-    try {
-      toast.info("Processing Repayment", {
-        description: "Please confirm the transaction in your wallet...",
-      });
-
-      // payback: col_amount = 0, debt_amount < 0 (natural units)
-      const txid = await operate(0, -amount);
-
-      toast.success("Repay Successful!", {
-        description: `Successfully repaid ${amount.toFixed(
-          6
-        )} ${tokenSymbol}. Transaction: ${txid}`,
-        duration: 5000,
-      });
-      setRepayAmount("");
-      onOpenChange(false);
-    } catch (error) {
-      toast.error("Transaction Failed", {
-        description:
-          error instanceof Error
-            ? error.message
-            : "Something went wrong. Please try again.",
-      });
-      setRepayAmount("");
-      console.error("Repay error:", error);
+  const getRiskStatus = () => {
+    if (!riskMetrics) return { text: "-", color: "text-neutral-500", bgColor: "bg-neutral-800", progressColor: "bg-neutral-500" };
+    switch (riskMetrics.riskLevel) {
+      case "safe": return { text: "Safe", color: "text-emerald-400", bgColor: "bg-emerald-400/20", progressColor: "bg-emerald-400" };
+      case "moderate": return { text: "Moderate", color: "text-yellow-400", bgColor: "bg-yellow-400/20", progressColor: "bg-yellow-400" };
+      case "high": return { text: "High Risk", color: "text-orange-500", bgColor: "bg-orange-500/20", progressColor: "bg-orange-500" };
+      case "liquidation": return { text: "Liquidation Risk", color: "text-red-500", bgColor: "bg-red-500/20", progressColor: "bg-red-500" };
     }
   };
 
+  const riskStatus = getRiskStatus();
+  const liquidationPriceStr = riskMetrics ? `$${riskMetrics.liquidationPrice.toFixed(2)}` : "$0.00";
+
+  const handleInitialClick = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!connected || !publicKey) {
+      toast.error("Wallet Not Connected");
+      return;
+    }
+    const amount = parseFloat(repayAmount);
+    if (isNaN(amount) || amount <= 0) {
+      toast.error("Invalid Amount");
+      return;
+    }
+    // Check if repay > borrowed
+    const borrowedAmountNum = parseFloat(borrowedAmount.split(" ")[0]);
+    if (amount > borrowedAmountNum) {
+      toast.error("Amount Exceeds Borrowed Debt");
+      return;
+    }
+
+    triggerSimulation();
+  };
+
+  const triggerSimulation = async () => {
+    const amount = parseFloat(repayAmount);
+    // Repay: col=0, debt=-amount
+    await simulate(0, -amount);
+    setShowPreview(true);
+  };
+
+  const handleConfirmRepay = async () => {
+    const amount = parseFloat(repayAmount);
+    await operate(0, -amount);
+    setShowPreview(false);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className="max-w-md bg-[#0B121A] border border-[#19242e] text-neutral-200 p-0"
         showCloseButton={false}
@@ -148,8 +193,10 @@ export const RepayModal = ({
           </DialogClose>
         </h2>
 
-        <form className="flex flex-col gap-4" onSubmit={handleRepay}>
+        <form className="flex flex-col gap-4" onSubmit={handleInitialClick}>
+
           <div className="flex flex-col gap-2 p-4">
+            {/* Info Block */}
             <div className="grid grid-cols-2 rounded-xl border border-neutral-850 bg-neutral-925/75 p-4">
               <div className="flex flex-col gap-0.5">
                 <span className="text-xs text-neutral-400">Wallet Balance</span>
@@ -242,7 +289,46 @@ export const RepayModal = ({
             </div>
           </div>
 
+          <div className="border-y border-neutral-850 p-4">
+            {/* Risk Section */}
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between font-semibold">
+                <span className="text-neutral-200">{displayRiskPercentage}% Risk</span>
+                <span className={riskStatus.color}>{riskStatus.text}</span>
+              </div>
+
+              {/* Projection Details */}
+              {riskMetrics && (
+                <div className="grid grid-cols-2 gap-4 mt-2 text-xs border-t border-neutral-800 pt-3">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-neutral-500">Health Factor</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-neutral-400">{riskMetrics.currentHF === Infinity ? "∞" : riskMetrics.currentHF.toFixed(2)}</span>
+                      <span className="iconify ph--arrow-right text-neutral-600"></span>
+                      <span className={`font-semibold ${riskMetrics.projectedHF > riskMetrics.currentHF ? 'text-emerald-400' : 'text-neutral-200'}`}>
+                        {riskMetrics.projectedHF === Infinity ? "∞" : riskMetrics.projectedHF.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1 text-right">
+                    <span className="text-neutral-500">LTV</span>
+                    <div className="flex items-center justify-end gap-1">
+                      <span className="text-neutral-400">{(riskMetrics.currentLTV * 100).toFixed(1)}%</span>
+                      <span className="iconify ph--arrow-right text-neutral-600"></span>
+                      <span className="font-semibold text-neutral-200">{(riskMetrics.projectedLTV * 100).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
           <div className="flex flex-col gap-4 p-4 pt-0">
+            {/* Explorer & Transaction Status */}
+            {(txState.status !== 'idle' && txState.status !== 'building') && (
+              <TransactionExplorer state={txState} />
+            )}
+
             {!connected && (
               <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-xs text-yellow-400">
                 <span
@@ -255,18 +341,24 @@ export const RepayModal = ({
             <button
               type="submit"
               disabled={
-                !repayAmount || parseFloat(repayAmount) <= 0 || !connected
+                !repayAmount || parseFloat(repayAmount) <= 0 || !connected || txState.status === 'awaiting_signature'
               }
               className="inline-flex items-center justify-center gap-1.5 font-medium transition-colors focus:outline-none focus:ring-1 disabled:pointer-events-none disabled:opacity-50 bg-primary text-neutral-950 hover:bg-primary-300 focus:ring-primary-300 px-6 py-3 text-sm rounded-xl"
             >
-              <span className="pointer-events-auto inline-flex empty:hidden"></span>
               <span className="contents truncate">
-                {!connected ? "Connect Wallet" : "Repay"}
+                {!connected ? "Connect Wallet" : txState.status === 'idle' || txState.status === 'success' ? "Repay" : "Processing..."}
               </span>
-              <span className="pointer-events-auto inline-flex empty:hidden"></span>
             </button>
           </div>
         </form>
+
+        <SimulationPreview
+          open={showPreview}
+          state={txState}
+          onConfirm={handleConfirmRepay}
+          onCancel={() => setShowPreview(false)}
+        />
+
       </DialogContent>
     </Dialog>
   );

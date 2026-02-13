@@ -19,7 +19,6 @@ import {
 } from "@solana/spl-token";
 import { SystemProgram } from "@solana/web3.js";
 import { getConnection, getMintDecimals } from "@/lib/solana";
-import { BN } from "bn.js";
 import { useSolPrice } from "@/hooks/useSolPrice";
 const WSOL_ACCOUNT_RENT = 0.00204;
 interface DepositModalProps {
@@ -39,6 +38,10 @@ interface DepositModalProps {
 
 import { SimulationPreview } from "@/components/ui/transactions/SimulationPreview";
 import { TransactionExplorer } from "@/components/ui/transactions/TransactionExplorer";
+import { calculateProjectedRisk, getRiskColor, RiskMetrics } from "@/engine/risk";
+import { BN } from "bn.js";
+import { SOL_DECIMALS, USDC_DECIMALS, SOL_MINT, LIQUIDATION_THRESHOLDS } from "@/engine/constants";
+import { usePosition } from "@/hooks/usePosition";
 
 export const DepositModal = ({
   open,
@@ -54,15 +57,48 @@ export const DepositModal = ({
   borrowedAmountFiat = "$0.00",
 }: DepositModalProps) => {
   const [depositAmount, setDepositAmount] = useState("");
-  const [riskPercentage, setRiskPercentage] = useState(0);
+  // Remove manual riskPercentage state, derive it from metrics
+  // const [riskPercentage, setRiskPercentage] = useState(0); 
+
   const { connected, publicKey } = useWallet();
   const { operate, simulate, state: txState, reset: txReset } = useOperate(vaultId, positionId);
+  const { position, loading: positionLoading } = usePosition(vaultId, positionId);
+
   const [walletBalance, setWalletBalance] = useState(0);
-  const [decimals, setDecimals] = useState(9); // Default to 9 for SOL, fetch dynamic
+  const [decimals, setDecimals] = useState(9);
   const { price: solPrice, loading: priceLoading } = useSolPrice();
 
   // UI State for Preview Modal
   const [showPreview, setShowPreview] = useState(false);
+
+  // Calculate Risk Metrics
+  const riskMetrics = React.useMemo(() => {
+    // Default / Empty State
+    if (!position || !solPrice) return null;
+
+    const amount = parseFloat(depositAmount);
+    return calculateProjectedRisk({
+      currentCollateralAmount: position.colRaw,
+      currentDebtAmount: position.debtRaw,
+      collateralDecimals: decimals, // SOL decimals (usually 9)
+      debtDecimals: USDC_DECIMALS, // USDC decimals (6)
+      collateralPrice: solPrice,
+      debtPrice: 1, // Stable
+      liquidationThreshold: LIQUIDATION_THRESHOLDS[SOL_MINT] || 0.8,
+      operation: 'deposit',
+      amount: isNaN(amount) ? 0 : amount
+    });
+  }, [position, solPrice, depositAmount, decimals]);
+
+  const riskPercentage = riskMetrics ? Math.round(100 / riskMetrics.projectedHF) : 0; // Or define risk % differently?
+  // Requirement: "Display: Current Health Factor, Projected Health Factor..."
+  // riskPercentage in UI is used for progress bar. Usually implies LTV / MaxLTV or 1/HF.
+  // Let's use 1/HF * 100 for risk bar? Or projectedLTV / Threshold * 100?
+  // Standard: LTV / Threshold is "Risk %".
+  // projectedHF = Threshold / LTV.
+  // So 1/HF = LTV / Threshold.
+  // YES. Risk % = (1 / HF) * 100.
+  const displayRiskPercentage = riskMetrics ? Math.min(100, Math.round((1 / riskMetrics.projectedHF) * 100)) : 0;
 
   // Fetch actual wallet balance from RPC & Decimals
   useEffect(() => {
@@ -100,50 +136,43 @@ export const DepositModal = ({
   };
 
   const handleHalf = () => {
-    setDepositAmount((walletBalance / 2).toFixed(decimals > 6 ? 6 : decimals)); // limit display decimals
-    setRiskPercentage(0);
+    setDepositAmount((walletBalance / 2).toFixed(decimals > 6 ? 6 : decimals));
   };
 
   const handleMax = () => {
     const maxDeposit = Math.max(0, walletBalance - WSOL_ACCOUNT_RENT);
     setDepositAmount(maxDeposit.toFixed(decimals > 6 ? 6 : decimals));
-    setRiskPercentage(0);
   };
 
-  const handleDepositAmountChange = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const handleDepositAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setDepositAmount(value);
-    setRiskPercentage(0);
   };
 
   const getRiskStatus = () => {
-    if (riskPercentage < 50)
-      return {
-        text: "Safe",
-        color: "text-emerald-400",
-        bgColor: "bg-emerald-400/20",
-        progressColor: "bg-emerald",
-      };
-    if (riskPercentage < 80)
-      return {
-        text: "Risky",
-        color: "text-orange-400",
-        bgColor: "bg-orange-400/20",
-        progressColor: "bg-orange-500",
-      };
-    return {
-      text: "Very Risky",
-      color: "text-red-400",
-      bgColor: "bg-red-400/20",
-      progressColor: "bg-red-500",
-    };
+    if (!riskMetrics) return { text: "-", color: "text-neutral-500", bgColor: "bg-neutral-800", progressColor: "bg-neutral-500" };
+
+    // Use riskMetrics.riskLevel logic
+    // risk.ts defines levels.
+    // "safe" | "moderate" | "high" | "liquidation"
+    // We map them to colors
+    switch (riskMetrics.riskLevel) {
+      case "safe":
+        return { text: "Safe", color: "text-emerald-400", bgColor: "bg-emerald-400/20", progressColor: "bg-emerald-400" };
+      case "moderate":
+        return { text: "Moderate", color: "text-yellow-400", bgColor: "bg-yellow-400/20", progressColor: "bg-yellow-400" };
+      case "high":
+        return { text: "High Risk", color: "text-orange-500", bgColor: "bg-orange-500/20", progressColor: "bg-orange-500" };
+      case "liquidation":
+        return { text: "Liquidation Risk", color: "text-red-500", bgColor: "bg-red-500/20", progressColor: "bg-red-500" };
+    }
   };
 
   const riskStatus = getRiskStatus();
-  const liquidationPrice = "0.00 USDC";
-  const dropPercentage = "100%";
+
+  // Formatted for display
+  const liquidationPriceStr = riskMetrics ? `$${riskMetrics.liquidationPrice.toFixed(2)}` : "$0.00";
+  const dropPercentageStr = riskMetrics ? `${riskMetrics.percentDropToLiquidation.toFixed(1)}%` : "0%";
 
   const calculateFiatValue = () => {
     if (!depositAmount || parseFloat(depositAmount) <= 0) return "$0.00";
@@ -356,39 +385,68 @@ export const DepositModal = ({
             </div>
           </div>
 
+
           <div className="border-y border-neutral-850 p-4">
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between font-semibold">
-                <span className="text-neutral-200">{riskPercentage}%</span>
+                <span className="text-neutral-200">{displayRiskPercentage}% Risk</span>
                 <span className={riskStatus.color}>{riskStatus.text}</span>
               </div>
+
+              {/* Progress Bar */}
               <div className="flex flex-col items-center gap-2">
                 <div
                   role="progressbar"
                   aria-valuemax={100}
                   aria-valuemin={0}
-                  aria-valuenow={riskPercentage}
-                  aria-valuetext={`${riskPercentage}%`}
+                  aria-valuenow={displayRiskPercentage}
                   data-state="loading"
-                  data-value={riskPercentage}
-                  data-max={100}
                   className={`relative h-1.5 w-full overflow-hidden rounded-xl ${riskStatus.bgColor}`}
                   style={{ transform: "translateY(0px)" }}
                 >
                   <div
-                    data-state="loading"
-                    data-value={riskPercentage}
-                    data-max={100}
                     className={`h-full w-full ${riskStatus.progressColor}`}
                     style={{
-                      transform: `translateX(-${100 - riskPercentage}%)`,
+                      transform: `translateX(-${100 - displayRiskPercentage}%)`,
                     }}
                   />
                 </div>
                 <span className="ml-auto text-xs text-neutral-500">
-                  Max: L.T. 80%
+                  Liquidation at 100%
                 </span>
               </div>
+
+              {/* Projection Details */}
+              {riskMetrics && (
+                <div className="grid grid-cols-2 gap-4 mt-2 text-xs">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-neutral-500">Health Factor</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-neutral-400">{riskMetrics.currentHF === Infinity ? "∞" : riskMetrics.currentHF.toFixed(2)}</span>
+                      <span className="iconify ph--arrow-right text-neutral-600"></span>
+                      <span className={`font-semibold ${riskMetrics.projectedHF < riskMetrics.currentHF ? 'text-orange-400' : 'text-emerald-400'}`}>
+                        {riskMetrics.projectedHF === Infinity ? "∞" : riskMetrics.projectedHF.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1 text-right">
+                    <span className="text-neutral-500">LTV</span>
+                    <div className="flex items-center justify-end gap-1">
+                      <span className="text-neutral-400">{(riskMetrics.currentLTV * 100).toFixed(1)}%</span>
+                      <span className="iconify ph--arrow-right text-neutral-600"></span>
+                      <span className="font-semibold text-neutral-200">{(riskMetrics.projectedLTV * 100).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-neutral-500">Liq. Price</span>
+                    <span className="font-mono text-neutral-200">{liquidationPriceStr}</span>
+                  </div>
+                  <div className="flex flex-col gap-1 text-right">
+                    <span className="text-neutral-500">Drop Buffer</span>
+                    <span className="font-mono text-neutral-200">{dropPercentageStr}</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -399,14 +457,10 @@ export const DepositModal = ({
             )}
 
             <div className="flex w-full items-start gap-2 text-xs text-neutral-500">
-              {/* Use question mark icon */}
               <span className="iconify ph--question-bold" style={{ height: "1lh", width: "1lh" }}></span>
               <span>
-                If {tokenSymbol} reaches{" "}
-                <span className="relative inline-flex items-center rounded-sm">
-                  <span translate="no">{liquidationPrice}</span>
-                </span>{" "}
-                (drops by {dropPercentage}%), your position may be partially liquidated
+                Based on current market conditions.
+                Liquidation occurs if {tokenSymbol} drops to <span className="text-neutral-300">{liquidationPriceStr}</span>.
               </span>
             </div>
 

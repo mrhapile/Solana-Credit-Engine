@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Image from "next/image";
 import { useWallet } from "@solana/wallet-adapter-react";
+import { PublicKey } from "@solana/web3.js";
 import {
   Dialog,
   DialogContent,
@@ -12,6 +13,13 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { toast } from "sonner";
 import { useOperate } from "@/hooks/useOperate";
+import { SimulationPreview } from "@/components/ui/transactions/SimulationPreview";
+import { TransactionExplorer } from "@/components/ui/transactions/TransactionExplorer";
+import { calculateProjectedRisk, getRiskColor, RiskMetrics } from "@/engine/risk";
+import { SOL_DECIMALS, USDC_DECIMALS, SOL_MINT, USDC_MINT, LIQUIDATION_THRESHOLDS } from "@/engine/constants";
+import { usePosition } from "@/hooks/usePosition";
+import { useSolPrice } from "@/hooks/useSolPrice";
+import { getConnection, getMintDecimals } from "@/lib/solana"; // Assuming getMintDecimals
 
 interface BorrowModalProps {
   open: boolean;
@@ -40,124 +48,148 @@ export const BorrowModal = ({
   tokenBalance = "0.00 USDC",
   borrowedAmount = "0.00 USDC",
   borrowedAmountFiat = "$0.00",
-  suppliedAmount = "14.14 SOL",
+  suppliedAmount = "14.14 SOL", // Visual prop only
   suppliedAmountFiat = "$1,770.02",
 }: BorrowModalProps) => {
   const [borrowAmount, setBorrowAmount] = useState("");
-  const [riskPercentage, setRiskPercentage] = useState(0);
-  const { connected, publicKey } = useWallet();
-  const { operate } = useOperate(vaultId, positionId);
+  // const [riskPercentage, setRiskPercentage] = useState(0); // Derived from metrics
 
-  const suppliedValueProxy = parseFloat(
-    suppliedAmountFiat.replace(/[^0-9.]/g, "")
-  );
+  const { connected, publicKey } = useWallet();
+  const { operate, simulate, state: txState, reset: txReset } = useOperate(vaultId, positionId);
+  const { position } = usePosition(vaultId, positionId);
+  const { price: solPrice, loading: priceLoading } = useSolPrice();
+
+  const [decimals, setDecimals] = useState(6); // Default USDC assumption
+  const [showPreview, setShowPreview] = useState(false);
+
+  // Fetch mint decimals for BORROW asset (USDC usually)
+  useEffect(() => {
+    (async () => {
+      try {
+        const conn = getConnection();
+        // Assuming borrowing USDC_MINT for now as per defaults
+        const mintDecimals = await getMintDecimals(conn, new PublicKey(USDC_MINT));
+        setDecimals(mintDecimals);
+      } catch (e) { console.error(e); }
+    })();
+  }, []);
+
+  const handleOpenChange = (isOpen: boolean) => {
+    onOpenChange(isOpen);
+    if (!isOpen) {
+      setTimeout(() => {
+        setBorrowAmount("");
+        txReset();
+        setShowPreview(false);
+      }, 300);
+    }
+  };
+
+  // Calculate Risk Metrics
+  const riskMetrics = React.useMemo(() => {
+    if (!position || !solPrice) return null;
+
+    const amount = parseFloat(borrowAmount);
+    return calculateProjectedRisk({
+      currentCollateralAmount: position.colRaw,
+      currentDebtAmount: position.debtRaw,
+      collateralDecimals: SOL_DECIMALS, // Assuming collateral is always SOL for this vault
+      debtDecimals: decimals,
+      collateralPrice: solPrice,
+      debtPrice: 1, // USDC
+      liquidationThreshold: LIQUIDATION_THRESHOLDS[SOL_MINT] || 0.8,
+      operation: 'borrow',
+      amount: isNaN(amount) ? 0 : amount
+    });
+  }, [position, solPrice, borrowAmount, decimals]);
+
+  // Derived LTV % for slider
+  // If we have position data, we can be accurate.
+  // suppliedAmountFiat prop is a fallback proxy, but we prefer `position`.
+  const currentCollateralVal = position && solPrice ? (position.colRaw.toNumber() / 1e9) * solPrice : 0;
+
+  // Slider controls LTV (Debt / Collateral).
+  // We want to update borrowAmount based on LTV.
+  // TargetDebt = CollateralVal * (LTV/100).
+  // BorrowAmount = TargetDebt - CurrentDebt.
 
   const handlePercentage = (percent: number) => {
-    const cappedPercent = Math.min(75, percent);
-    setRiskPercentage(cappedPercent);
-    if (!suppliedValueProxy || suppliedValueProxy <= 0) return;
+    const cappedPercent = Math.min(80, percent); // Cap at 80 for safety (LT)
 
-    const amount = (suppliedValueProxy * cappedPercent) / 100;
-    setBorrowAmount(amount > 0 ? amount.toFixed(2) : "");
+    if (!currentCollateralVal || currentCollateralVal <= 0) return;
+
+    // Calculate Target Debt Value
+    const targetDebtVal = currentCollateralVal * (cappedPercent / 100);
+
+    // Current Debt Value
+    const currentDebtVal = position ? (position.debtRaw.toNumber() / Math.pow(10, decimals)) : 0;
+
+    // Amount to borrow = Target - Current
+    const amountToBorrow = Math.max(0, targetDebtVal - currentDebtVal);
+
+    setBorrowAmount(amountToBorrow.toFixed(2));
   };
+
+  // Current LTV for Slider display
+  const sliderValue = riskMetrics ? Math.min(100, riskMetrics.projectedLTV * 100) : 0;
 
   const handleBorrowAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setBorrowAmount(value);
-
-    if (!value || isNaN(parseFloat(value))) {
-      setRiskPercentage(0);
-      return;
-    }
-
-    const numValue = parseFloat(value);
-    if (suppliedValueProxy > 0) {
-      const percent = (numValue / suppliedValueProxy) * 100;
-      setRiskPercentage(Math.min(75, Math.max(0, percent)));
-    }
   };
 
   const getRiskStatus = () => {
-    if (riskPercentage <= 60)
-      return {
-        text: "Safe",
-        color: "text-emerald-400",
-        bgColor: "bg-emerald-400/20",
-        progressColor: "bg-emerald-500",
-      };
-    if (riskPercentage <= 70)
-      return {
-        text: "Risky",
-        color: "text-yellow-400",
-        bgColor: "bg-yellow-400/20",
-        progressColor: "bg-yellow-500",
-      };
-    return {
-      text: "Very Risky",
-      color: "text-orange-400",
-      bgColor: "bg-orange-400/20",
-      progressColor: "bg-orange-500",
-      strokeColor: "stroke-orange-500",
-    };
+    if (!riskMetrics) return { text: "-", color: "text-neutral-500", bgColor: "bg-neutral-800", progressColor: "bg-neutral-500", strokeColor: "stroke-neutral-500" };
+    switch (riskMetrics.riskLevel) {
+      case "safe":
+        return { text: "Safe", color: "text-emerald-400", bgColor: "bg-emerald-400/20", progressColor: "bg-emerald-500", strokeColor: "stroke-emerald-500" };
+      case "moderate":
+        return { text: "Moderate", color: "text-yellow-400", bgColor: "bg-yellow-400/20", progressColor: "bg-yellow-500", strokeColor: "stroke-yellow-500" };
+      case "high":
+        return { text: "High Risk", color: "text-orange-500", bgColor: "bg-orange-500/20", progressColor: "bg-orange-500", strokeColor: "stroke-orange-500" };
+      case "liquidation":
+        return { text: "Liquidation Risk", color: "text-red-500", bgColor: "bg-red-500/20", progressColor: "bg-red-500", strokeColor: "stroke-red-500" };
+    }
   };
 
   const riskStatus = getRiskStatus();
-  const liquidationPrice = "0.00 USDC";
-  const dropPercentage = "100%";
+  const liquidationPriceStr = riskMetrics ? `$${riskMetrics.liquidationPrice.toFixed(2)}` : "$0.00";
+  const dropPercentageStr = riskMetrics ? `${riskMetrics.percentDropToLiquidation.toFixed(1)}%` : "0%";
 
   const calculateFiatValue = () => {
     if (!borrowAmount || parseFloat(borrowAmount) <= 0) return "$0.00";
     return `$${parseFloat(borrowAmount).toFixed(2)}`;
   };
 
-  const handleBorrow = async (e: React.FormEvent) => {
+  const handleInitialClick = (e: React.FormEvent) => {
     e.preventDefault();
-
     if (!connected || !publicKey) {
-      toast.error("Wallet Not Connected", {
-        description: "Please connect your wallet to proceed.",
-      });
+      toast.error("Wallet Not Connected");
       return;
     }
-
     const amount = parseFloat(borrowAmount);
-
     if (isNaN(amount) || amount <= 0) {
-      toast.error("Invalid Amount", {
-        description: "Please enter a valid borrow amount.",
-      });
+      toast.error("Invalid Amount");
       return;
     }
+    triggerSimulation();
+  };
 
-    try {
-      toast.info("Processing Borrow", {
-        description: "Please confirm the transaction in your wallet...",
-      });
+  const triggerSimulation = async () => {
+    const amount = parseFloat(borrowAmount);
+    // Borrow: col=0, debt=amount
+    await simulate(0, amount);
+    setShowPreview(true);
+  };
 
-      // borrow: col_amount = 0, debt_amount > 0 (pass natural units)
-      const txid = await operate(0, amount);
-
-      toast.success("Borrow Successful!", {
-        description: `Successfully borrowed ${amount.toFixed(
-          6
-        )} ${tokenSymbol}. Transaction: ${txid}`,
-        duration: 5000,
-      });
-      setBorrowAmount("");
-      onOpenChange(false);
-    } catch (error) {
-      toast.error("Transaction Failed", {
-        description:
-          error instanceof Error
-            ? error.message
-            : "Something went wrong. Please try again.",
-      });
-      console.error("Borrow error:", error);
-    }
+  const handleConfirmBorrow = async () => {
+    const amount = parseFloat(borrowAmount);
+    await operate(0, amount);
+    setShowPreview(false);
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className="max-w-md bg-[#0B121A] border border-[#19242e] text-neutral-200 p-0"
         showCloseButton={false}
@@ -181,8 +213,10 @@ export const BorrowModal = ({
           </DialogClose>
         </h2>
 
-        <form className="flex flex-col gap-4" onSubmit={handleBorrow}>
+        <form className="flex flex-col gap-4" onSubmit={handleInitialClick}>
+
           <div className="flex flex-col gap-2 p-4">
+            {/* Supply/Borrow Info */}
             <div className="grid grid-cols-2 rounded-xl border border-neutral-850 bg-neutral-925/75 p-4">
               <div className="flex flex-col gap-0.5">
                 <span className="text-xs text-neutral-400">Supplied</span>
@@ -226,6 +260,7 @@ export const BorrowModal = ({
                   </div>
                 </div>
                 <div className="flex items-center justify-between">
+                  {/* Token Icon */}
                   <div className="flex w-fit shrink-0 items-center justify-between gap-2.5 rounded-xl border border-neutral-850 bg-neutral-850 p-3">
                     <Image
                       className="h-6 w-6"
@@ -238,6 +273,7 @@ export const BorrowModal = ({
                       {tokenSymbol}
                     </span>
                   </div>
+                  {/* Input */}
                   <div className="ml-auto flex flex-col text-right">
                     <input
                       inputMode="decimal"
@@ -262,115 +298,105 @@ export const BorrowModal = ({
           </div>
 
           <div className="border-y border-neutral-850 p-4">
+            {/* Slider & Risk */}
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between font-semibold">
-                <span className="flex items-center gap-2">
-                  Status
+                {/* Current Projected LTV display instead of just "Status" */}
+                <span className="text-xs text-neutral-400">Current LTV: {(riskMetrics ? riskMetrics.currentLTV * 100 : 0).toFixed(1)}%</span>
+                <div className="flex items-center gap-2">
                   <span className={riskStatus.color}>{riskStatus.text}</span>
-                </span>
-                <span className="text-neutral-200">{riskPercentage}%</span>
+                  <span className="text-neutral-200">{sliderValue.toFixed(1)}% LTV</span>
+                </div>
               </div>
+
               <div className="relative flex w-full flex-col items-center gap-2">
                 <div className="w-full">
                   <Slider
-                    value={riskPercentage}
+                    value={sliderValue}
                     onChange={handlePercentage}
                     riskStatus={riskStatus}
                     className="z-10"
                   />
+                  {/* Ticks */}
                   <div
                     className="relative mb-4 w-full"
                     style={{ transform: "translateY(-18px)" }}
                   >
-                    <div
-                      className="absolute top-0 text-center"
-                      style={{ left: "0%", transform: "translateX(-50%)" }}
-                    >
-                      <button
-                        type="button"
-                        className="flex flex-col items-center gap-2"
-                        onClick={() => handlePercentage(0)}
+                    {[0, 25, 50, 75].map((tick) => (
+                      <div
+                        key={tick}
+                        className="absolute top-0 text-center"
+                        style={{ left: `${tick}%`, transform: "translateX(-50%)" }}
                       >
-                        <div className="h-4 w-[3px] scale-125 rounded-2xl bg-emerald"></div>
-                        <span className="text-xs text-neutral-500 translate-x-1.5">
-                          0%
-                        </span>
-                      </button>
-                    </div>
-                    <div
-                      className="absolute top-0 text-center"
-                      style={{ left: "25%", transform: "translateX(-50%)" }}
-                    >
-                      <button
-                        type="button"
-                        className="flex flex-col items-center gap-2"
-                        onClick={() => handlePercentage(25)}
-                      >
-                        <div className="h-4 w-[3px] scale-125 rounded-2xl bg-neutral-750"></div>
-                        <span className="text-xs text-neutral-500">25%</span>
-                      </button>
-                    </div>
-                    <div
-                      className="absolute top-0 text-center"
-                      style={{ left: "50%", transform: "translateX(-50%)" }}
-                    >
-                      <button
-                        type="button"
-                        className="flex flex-col items-center gap-2"
-                        onClick={() => handlePercentage(50)}
-                      >
-                        <div className="h-4 w-[3px] scale-125 rounded-2xl bg-neutral-750"></div>
-                        <span className="text-xs text-neutral-500">50%</span>
-                      </button>
-                    </div>
-                    <div
-                      className="absolute top-0 text-center"
-                      style={{ left: "75%", transform: "translateX(-50%)" }}
-                    >
-                      <button
-                        type="button"
-                        className="flex flex-col items-center gap-2"
-                        onClick={() => handlePercentage(75)}
-                      >
-                        <div className="h-4 w-[3px] rounded-2xl scale-125 bg-neutral-200"></div>
-                        <span className="text-xs text-neutral-200">75%</span>
-                      </button>
-                    </div>
+                        <button
+                          type="button"
+                          className="flex flex-col items-center gap-2"
+                          onClick={() => handlePercentage(tick)}
+                        >
+                          <div className={`h-4 w-[3px] rounded-2xl ${tick === 0 ? 'bg-emerald scale-125' : 'bg-neutral-750'}`}></div>
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 </div>
                 <span className="ml-auto text-xs text-neutral-500">
-                  Max: L.T. 80%
+                  Liquidation at 80% LTV
                 </span>
               </div>
+
+              {/* Projection Details */}
+              {riskMetrics && (
+                <div className="grid grid-cols-2 gap-4 mt-2 text-xs border-t border-neutral-800 pt-3">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-neutral-500">Health Factor</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-neutral-400">{riskMetrics.currentHF === Infinity ? "∞" : riskMetrics.currentHF.toFixed(2)}</span>
+                      <span className="iconify ph--arrow-right text-neutral-600"></span>
+                      <span className={`font-semibold ${riskMetrics.projectedHF < 1.1 ? 'text-my-red' : 'text-neutral-200'}`}>
+                        {riskMetrics.projectedHF === Infinity ? "∞" : riskMetrics.projectedHF.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1 text-right">
+                    <span className="text-neutral-500">Liq. Price (SOL)</span>
+                    <span className="font-mono text-neutral-200">{liquidationPriceStr}</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
           <div className="flex flex-col gap-4 p-4 pt-0">
+            {(txState.status !== 'idle' && txState.status !== 'building') && (
+              <TransactionExplorer state={txState} />
+            )}
+
             <div className="flex w-full items-start gap-2 text-xs text-neutral-500">
-              <span
-                className="iconify ph--question-bold"
-                style={{ height: "1lh", width: "1lh" }}
-              ></span>
+              <span className="iconify ph--question-bold" style={{ height: "1lh", width: "1lh" }}></span>
               <span>
-                If SOL reaches{" "}
-                <span className="relative inline-flex items-center rounded-sm">
-                  <span translate="no">{liquidationPrice}</span>
-                </span>{" "}
-                (drops by {dropPercentage}%), your position may be partially
-                liquidated
+                Based on current market conditions.
+                Liquidation occurs if SOL drops to <span className="text-neutral-300">{liquidationPriceStr}</span> ({dropPercentageStr} drop).
               </span>
             </div>
             <button
-              disabled={!borrowAmount || parseFloat(borrowAmount) <= 0}
+              disabled={!borrowAmount || parseFloat(borrowAmount) <= 0 || !connected || txState.status === 'awaiting_signature'}
               className="inline-flex items-center justify-center gap-1.5 font-medium transition-colors focus:outline-none focus:ring-1 disabled:pointer-events-none disabled:opacity-50 bg-primary text-neutral-950 hover:bg-primary-300 focus:ring-primary-300 px-6 py-3 text-sm rounded-xl"
               type="submit"
             >
-              <span className="pointer-events-auto inline-flex empty:hidden"></span>
-              <span className="contents truncate">Borrow</span>
-              <span className="pointer-events-auto inline-flex empty:hidden"></span>
+              <span className="contents truncate">
+                {!connected ? "Connect Wallet" : txState.status === 'idle' || txState.status === 'success' ? "Borrow" : "Processing..."}
+              </span>
             </button>
           </div>
         </form>
+
+        <SimulationPreview
+          open={showPreview}
+          state={txState}
+          onConfirm={handleConfirmBorrow}
+          onCancel={() => setShowPreview(false)}
+        />
+
       </DialogContent>
     </Dialog>
   );
