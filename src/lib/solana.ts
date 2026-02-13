@@ -62,12 +62,26 @@ export function getConnection(): Connection {
  * - 'average': The average.
  * We'll use a 75th percentile strategy to be safe but not overpay, bounded by a reasonable max.
  */
+import { safeRpcCall } from "./rpcGuard";
+
+let priorityFeeCache: { fee: number; timestamp: number } | null = null;
+const FEE_CACHE_TTL = 60000; // 60s
+const DEFAULT_FEE = 1000;
+
 export async function estimatePriorityFee(
     connection: Connection,
     instructions: TransactionInstruction[]
 ): Promise<number> {
+    const now = Date.now();
+
+    // 1. Check Cache
+    if (priorityFeeCache && (now - priorityFeeCache.timestamp < FEE_CACHE_TTL)) {
+        console.debug("Using cached priority fee:", priorityFeeCache.fee);
+        return priorityFeeCache.fee;
+    }
+
     try {
-        // detailed logic to extract writable accounts
+        // Detailed logic to extract writable accounts
         const accounts = new Set<string>();
         for (const ix of instructions) {
             for (const key of ix.keys) {
@@ -79,32 +93,36 @@ export async function estimatePriorityFee(
         }
 
         const accountKeys = Array.from(accounts).map(k => new PublicKey(k));
-
-        // If too many accounts, slice for performance/RPC limits (though getRecentPrioritizationFees handles many)
-        // Max 128 accounts is typical limit if passed often.
         const limitedKeys = accountKeys.slice(0, 128);
 
-        const fees = await connection.getRecentPrioritizationFees({
-            lockedWritableAccounts: limitedKeys
+        // 2. Use RPC Guard
+        const fee = await safeRpcCall(async () => {
+            const fees = await connection.getRecentPrioritizationFees({
+                lockedWritableAccounts: limitedKeys
+            });
+
+            if (fees.length === 0) return DEFAULT_FEE;
+
+            // Sort fees by prioritizationFee
+            const sortedFees = fees
+                .map(f => f.prioritizationFee)
+                .sort((a, b) => a - b);
+
+            // 75th percentile
+            const index = Math.floor(sortedFees.length * 0.75);
+            return Math.max(sortedFees[index], DEFAULT_FEE);
+        }, {
+            context: 'estimatePriorityFee',
+            fallbackValue: priorityFeeCache?.fee || DEFAULT_FEE
         });
 
-        if (fees.length === 0) return 1000; // Default min
+        // 3. Update Cache
+        priorityFeeCache = { fee, timestamp: now };
+        return fee;
 
-        // Sort fees by prioritizationFee
-        const sortedFees = fees
-            .map(f => f.prioritizationFee)
-            .sort((a, b) => a - b);
-
-        // 75th percentile
-        const index = Math.floor(sortedFees.length * 0.75);
-        const fee = sortedFees[index];
-
-        // Cap at some reasonable max to prevent draining wallet on spikes?
-        // User didn't specify a cap, but "Dynamic priority fee" is the goal.
-        return Math.max(fee, 1000); // Ensure at least 1000 (min)
     } catch (e) {
-        console.warn("Failed to estimate priority fee, defaulting to 1000", e);
-        // We still return default, but log warning. Caller handles if critical.
-        return 1000;
+        console.warn("Failed to estimate priority fee, defaulting.", e);
+        return priorityFeeCache?.fee || DEFAULT_FEE;
     }
 }
+

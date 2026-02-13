@@ -6,6 +6,7 @@ import { simulateTransaction } from "./simulation";
 import { LendingTransactionInput, TxFailureType } from "./types";
 import { estimatePriorityFee, getSolscanTxLink } from "../lib/solana";
 import { TransactionStatus } from "@/hooks/transactions/useTransactionLifecycle";
+import { safeRpcCall } from "../lib/rpcGuard";
 
 export interface TransactionCallbacks {
     onStatusChange?: (status: TransactionStatus) => void;
@@ -128,10 +129,13 @@ export async function executeLendingTransaction(
     onStatusChange?.("sending");
     let signature: string;
     try {
-        signature = await connection.sendRawTransaction(signedTx.serialize(), {
-            skipPreflight: true, // We already simulated
-            maxRetries: 3, // Basic retries
-        });
+        signature = await safeRpcCall(async () => {
+            return await connection.sendRawTransaction(signedTx.serialize(), {
+                skipPreflight: true, // We already simulated
+                maxRetries: 0, // We handle retries via safeRpcCall + global retry strategy if needed
+            });
+        }, { context: 'sendRawTransaction' });
+
         const link = getSolscanTxLink(signature);
         onTxSent?.(signature, link);
     } catch (err: any) {
@@ -156,22 +160,17 @@ export async function executeLendingTransaction(
     console.log("Confirming transaction...");
     onStatusChange?.("confirming");
 
-    // Implement Retry + Timeout Logic for Confirmation
-    const MAX_CONFIRM_RETRIES = 2; // Try confirming a few times if basic confirm fails/times out
-    let finalized = false;
-
-    // We can loop or just one-shot robust confirm
     try {
-        // Await confirmation with "confirmed" commitment
-        // This throws if it times out or expires
-        const confirmation = await connection.confirmTransaction(signature, "confirmed");
+        const confirmation = await safeRpcCall(async () => {
+            return await connection.confirmTransaction(signature, "confirmed");
+        }, { context: 'confirmTransaction' });
 
         if (confirmation.value.err) {
             throw new Error(`Transaction failed on-chain: ${JSON.stringify(confirmation.value.err)}`);
         }
 
         console.log("Transaction confirmed!");
-        finalized = true;
+        // finalized = true; // Not strictly needed
 
         // Final Success State
         onStatusChange?.("success");

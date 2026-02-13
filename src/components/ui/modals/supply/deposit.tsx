@@ -36,6 +36,8 @@ interface DepositModalProps {
 }
 
 
+import { useQueryClient } from "@tanstack/react-query";
+
 import { SimulationPreview } from "@/components/ui/transactions/SimulationPreview";
 import { TransactionExplorer } from "@/components/ui/transactions/TransactionExplorer";
 import { calculateProjectedRisk, getRiskColor, RiskMetrics } from "@/engine/risk";
@@ -60,9 +62,20 @@ export const DepositModal = ({
   // Remove manual riskPercentage state, derive it from metrics
   // const [riskPercentage, setRiskPercentage] = useState(0); 
 
+  const queryClient = useQueryClient();
   const { connected, publicKey } = useWallet();
   const { operate, simulate, state: txState, reset: txReset } = useOperate(vaultId, positionId);
-  const { position, loading: positionLoading } = usePosition(vaultId, positionId);
+
+  const isProcessing =
+    txState.status === 'building' ||
+    txState.status === 'simulating' ||
+    txState.status === 'optimizing' ||
+    txState.status === 'sending' ||
+    txState.status === 'confirming' ||
+    txState.status === 'awaiting_signature';
+
+  // Pause polling if transaction is processing
+  const { position, loading: positionLoading } = usePosition(vaultId, positionId, { paused: isProcessing });
 
   const [walletBalance, setWalletBalance] = useState(0);
   const [decimals, setDecimals] = useState(9);
@@ -260,8 +273,7 @@ export const DepositModal = ({
     const amount = parseFloat(depositAmount);
     // Run for real
     await operate(amount, 0);
-    // Close preview handled by success state or manual close? 
-    // Usually we keep explorer open.
+    queryClient.invalidateQueries({ queryKey: ['position', vaultId, positionId] });
     setShowPreview(false); // We hide preview, show explorer
   };
 
@@ -476,7 +488,7 @@ export const DepositModal = ({
             <button
               type="submit"
               disabled={
-                !depositAmount || parseFloat(depositAmount) <= 0 || !connected || txState.status === 'awaiting_signature' || txState.status === 'sending' || txState.status === 'confirming'
+                !depositAmount || parseFloat(depositAmount) <= 0 || !connected || isProcessing
               }
               className="inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors focus:outline-none focus:ring-1 disabled:pointer-events-none disabled:opacity-50 bg-primary text-neutral-950 hover:bg-primary-300 focus:ring-primary-300 px-6 py-3 text-sm rounded-xl"
             >

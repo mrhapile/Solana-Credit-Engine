@@ -24,6 +24,17 @@ export function useOperate(vaultId: number, positionId: number) {
         return;
       }
 
+      // Prevent concurrent operations
+      if (lifecycle.state.status === 'building' ||
+        lifecycle.state.status === 'simulating' ||
+        lifecycle.state.status === 'optimizing' ||
+        lifecycle.state.status === 'sending' ||
+        lifecycle.state.status === 'confirming' ||
+        lifecycle.state.status === 'awaiting_signature') {
+        console.warn("Operation already in progress");
+        return;
+      }
+
       // Reset state for new operation
       lifecycle.reset();
       lifecycle.setStatus('building');

@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import Image from "next/image";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Dialog,
   DialogContent,
@@ -48,9 +49,20 @@ export const RepayModal = ({
   borrowedAmountFiat = "$50.00",
 }: RepayModalProps) => {
   const [repayAmount, setRepayAmount] = useState("");
+  const queryClient = useQueryClient();
   const { connected, publicKey } = useWallet();
   const { operate, simulate, state: txState, reset: txReset } = useOperate(vaultId, positionId);
-  const { position } = usePosition(vaultId, positionId);
+
+  const isProcessing =
+    txState.status === 'building' ||
+    txState.status === 'simulating' ||
+    txState.status === 'optimizing' ||
+    txState.status === 'sending' ||
+    txState.status === 'confirming' ||
+    txState.status === 'awaiting_signature';
+
+  // Pause polling if transaction is active
+  const { position } = usePosition(vaultId, positionId, { paused: isProcessing });
   const { price: solPrice, loading: priceLoading } = useSolPrice();
 
   const [decimals, setDecimals] = useState(6); // Default USDC
@@ -165,6 +177,7 @@ export const RepayModal = ({
   const handleConfirmRepay = async () => {
     const amount = parseFloat(repayAmount);
     await operate(0, -amount);
+    queryClient.invalidateQueries({ queryKey: ['position', vaultId, positionId] });
     setShowPreview(false);
   };
 
@@ -341,7 +354,7 @@ export const RepayModal = ({
             <button
               type="submit"
               disabled={
-                !repayAmount || parseFloat(repayAmount) <= 0 || !connected || txState.status === 'awaiting_signature'
+                !repayAmount || parseFloat(repayAmount) <= 0 || !connected || isProcessing
               }
               className="inline-flex items-center justify-center gap-1.5 font-medium transition-colors focus:outline-none focus:ring-1 disabled:pointer-events-none disabled:opacity-50 bg-primary text-neutral-950 hover:bg-primary-300 focus:ring-primary-300 px-6 py-3 text-sm rounded-xl"
             >

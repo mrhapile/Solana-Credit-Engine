@@ -1,9 +1,11 @@
-
-import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { getCurrentPosition } from "@jup-ag/lend/borrow";
 import { getConnection } from "@/lib/solana";
-import { fetchTokenPrices } from "@/lib/prices";
+import { fetchTokenPrices } from "@/lib/prices"; // Assuming this exists as per previous code
 import { SOL_MINT, USDC_MINT, SOL_DECIMALS, USDC_DECIMALS } from "@/engine/constants";
+
+
+// I'll import BN
 import BN from "bn.js";
 
 type PositionState = {
@@ -18,55 +20,47 @@ type PositionState = {
   postLiquidationBranchId: number;
 } | null;
 
-export function usePosition(vaultId: number, positionId: number) {
-  const [position, setPosition] = useState<PositionState>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [prices, setPrices] = useState<{ [key: string]: number }>({});
+export function usePosition(vaultId: number, positionId: number, options?: { paused?: boolean }) {
+  const isPaused = options?.paused || false;
 
-  useEffect(() => {
-    async function fetchPosition() {
-      try {
-        if (!vaultId || !positionId) {
-          throw new Error("Invalid vaultId or positionId");
-        }
+  // Position Query
+  const {
+    data: position,
+    isLoading: posLoading,
+    error: posError
+  } = useQuery({
+    queryKey: ['position', vaultId, positionId],
+    queryFn: async () => {
+      if (!vaultId || !positionId) return null;
+      console.log("Fetching position...", vaultId, positionId);
+      return await getCurrentPosition({
+        vaultId,
+        positionId,
+        connection: getConnection(),
+      });
+    },
+    refetchInterval: 30000, // Reduced polling (30s)
+    enabled: !isPaused && !!vaultId && !!positionId,
+    refetchOnWindowFocus: false, // Additional optimization
+  });
 
-        setLoading(true);
-        setError(null);
+  // Price Query (Reuse cache key across app)
+  const {
+    data: prices,
+    isLoading: priceLoading
+  } = useQuery({
+    queryKey: ['prices', SOL_MINT, USDC_MINT],
+    queryFn: async () => {
+      return await fetchTokenPrices([SOL_MINT, USDC_MINT]);
+    },
+    refetchInterval: 60000,
+    staleTime: 30000,
+  });
 
-        // Fetch position
-        const data = await getCurrentPosition({
-          vaultId,
-          positionId,
-          connection: getConnection(),
-        });
+  const solPrice = prices?.[SOL_MINT] || 0;
+  const usdcPrice = prices?.[USDC_MINT] || 1;
 
-        // Fetch prices separately or together? 
-        // The user's snippet in prompt only fetched position.
-        // But the rest of the hook uses prices.
-        // I should keep prices fetching. 
-        const priceData = await fetchTokenPrices([SOL_MINT, USDC_MINT]);
-
-        console.log("Position loaded:", data);
-        setPosition(data);
-        setPrices(priceData);
-      } catch (err: any) {
-        console.error("Position fetch error:", err);
-        setError(err.message || "Failed to load position");
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchPosition();
-
-    // Set up interval for refreshing prices/position? 
-    // The user requested a simple useEffect for now. I won't add polling here to keep it strictly as requested.
-  }, [vaultId, positionId]);
-
-  const solPrice = prices[SOL_MINT] || 0;
-  const usdcPrice = prices[USDC_MINT] || 1;
-
+  // Formatting Logic
   const formatted = position
     ? {
       collateralAmount: position.colRaw.toNumber() / Math.pow(10, SOL_DECIMALS), // SOL
@@ -77,5 +71,10 @@ export function usePosition(vaultId: number, positionId: number) {
     }
     : null;
 
-  return { position, formatted, loading, error };
+  return {
+    position: position || null,
+    formatted,
+    loading: posLoading || priceLoading,
+    error: (posError as Error)?.message || null
+  };
 }

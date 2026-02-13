@@ -5,15 +5,19 @@ import { TxFailureType, SimulationResult, ComputedTransaction } from "./types";
 /**
  * Simulates a transaction before sending to ensure determinism and catch errors early.
  */
+import { safeRpcCall } from "../lib/rpcGuard";
+
 export async function simulateTransaction(
     connection: Connection,
     transaction: VersionedTransaction
 ): Promise<SimulationResult> {
     try {
-        const { value: simulation } = await connection.simulateTransaction(transaction, {
-            replaceRecentBlockhash: true,
-            commitment: "processed",
-        });
+        const { value: simulation } = await safeRpcCall(async () => {
+            return await connection.simulateTransaction(transaction, {
+                replaceRecentBlockhash: true,
+                commitment: "processed",
+            });
+        }, { context: 'simulateTransaction' });
 
         if (simulation.err) {
             const logs = simulation.logs || [];
