@@ -49,7 +49,10 @@ let connection: Connection | null = null;
 
 export function getConnection(): Connection {
     if (connection) return connection;
-    connection = new Connection(getRpcUrl(), "processed");
+    connection = new Connection(getRpcUrl(), {
+        commitment: "processed",
+        disableRetryOnRateLimit: true,
+    });
     return connection;
 }
 

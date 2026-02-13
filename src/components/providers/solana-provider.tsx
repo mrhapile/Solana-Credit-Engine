@@ -12,6 +12,11 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 import dynamic from "next/dynamic";
 import { Button } from "../ui/button";
 
+import {
+  PhantomWalletAdapter,
+  SolflareWalletAdapter,
+} from "@solana/wallet-adapter-wallets";
+
 interface SolanaProviderProps {
   children: ReactNode;
 }
@@ -40,9 +45,23 @@ export const SolanaProvider: FC<SolanaProviderProps> = ({ children }) => {
   const network = WalletAdapterNetwork.Mainnet;
   const endpoint = useMemo(() => clusterApiUrl(network), [network]);
 
+  const wallets = useMemo(
+    () => [
+      new PhantomWalletAdapter(),
+      new SolflareWalletAdapter({ network }),
+    ],
+    [network]
+  );
+
   return (
-    <ConnectionProvider endpoint={endpoint}>
-      <WalletProvider wallets={[]} autoConnect>
+    <ConnectionProvider
+      endpoint={endpoint}
+      config={{
+        commitment: "processed",
+        disableRetryOnRateLimit: true
+      }}
+    >
+      <WalletProvider wallets={wallets} autoConnect>
         <WalletModalProvider>{children}</WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>

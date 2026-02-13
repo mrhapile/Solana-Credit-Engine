@@ -3,6 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { WalletMultiButton } from "../providers/solana-provider";
+import { useWallet } from "@solana/wallet-adapter-react";
 
 export const NavBar = () => {
   return (
